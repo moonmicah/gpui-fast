@@ -23,7 +23,7 @@ wayland = ["gpui_fast/wayland"]
 x11 = ["gpui_fast/x11"]
 
 [dependencies]
-gpui_fast = { package = "gpui_platform", path = "../../crates/gpui_platform", default-features = false }
+gpui_fast = { package = "gpui-fast-platform", path = "../../crates/gpui_platform", default-features = false }
 # gpui-pre-platform's `inspector` turns on GPUI's; this repository's
 # gpui_platform has no such feature, so it is forwarded to gpui directly.
-gpui = { path = "../../crates/gpui", default-features = false }
+gpui = { package = "gpui-fast", path = "../../crates/gpui", default-features = false }

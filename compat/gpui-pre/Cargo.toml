@@ -26,4 +26,4 @@ windows-manifest = ["gpui_fast/windows-manifest"]
 x11 = ["gpui_fast/x11"]
 
 [dependencies]
-gpui_fast = { package = "gpui", path = "../../crates/gpui", default-features = false }
+gpui_fast = { package = "gpui-fast", path = "../../crates/gpui", default-features = false }

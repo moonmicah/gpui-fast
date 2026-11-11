@@ -15,4 +15,4 @@ doctest = false
 inspector = ["gpui_fast/inspector"]
 
 [dependencies]
-gpui_fast = { package = "gpui_macros", path = "../../crates/gpui_macros", default-features = false }
+gpui_fast = { package = "gpui-fast-macros", path = "../../crates/gpui_macros", default-features = false }
