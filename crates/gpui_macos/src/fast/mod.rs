@@ -9,4 +9,5 @@
 
 pub(crate) mod composition;
 pub(crate) mod cursor;
+pub(crate) mod frame_demand;
 pub(crate) mod menu;
