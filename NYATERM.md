@@ -13,8 +13,16 @@ nyaterm
 ├── build:   wire the release crates by path inside this workspace
 ├── fast:    answer CursorStyle::Hidden with a transparent native cursor
 ├── docs:    register the CursorStyle::Hidden exception with its PR number
-└── nyaterm: carry the local engine patches onto the release-form branch
+├── nyaterm: carry the local engine patches onto the release-form branch
+├── docs:    document the nyaterm branch
+├── macos:   damage the native view when requesting an idle frame   (#137)
+├── macos:   preserve nonblocking frame-source attachment checks    (#137)
+└── fast:    wait longer each time a layer's content is still ineligible (#138)
 ```
+
+The last three commits backport upstream pull requests that were open when
+they were taken; see the section below for how to drop them once upstream
+merges them.
 
 ## 2026-11-12 move NyaTerm onto a fork branch
 
@@ -42,6 +50,26 @@ three-way merged with current upstream sources:
 
 The Windows dynamic-texture backend is **not** carried here: upstream
 #131 already ships it.
+
+## 2026-11-12 backport two open upstream pull requests
+
+Both were still open upstream, and both fix behaviour NyaTerm hits, so
+they ride on this branch until upstream merges them:
+
+| PR | Upstream branch | What it fixes |
+| --- | --- | --- |
+| #137 | `hesong12:fix/macos-idle-redraw` | an idle macOS window stops receiving `CAMetalDisplayLink` callbacks while GPUI keeps waking its dirty window, so the frame is only painted once something else forces compositing; the shared waker now also marks the `NSView` for display through `displayLayer` (`fast/frame_demand.rs`) |
+| #138 | `ilianovi3:fix/scroll-layer-ineligible-backoff` | a scroll layer whose content stays ineligible is retried every frame at 120 Hz; the wait now grows each time (`fast/layers/policy.rs`) |
+
+They were cherry-picked onto the release-form manifests. Two conflicts
+needed hand resolution: `crates/gpui_macos/src/fast/mod.rs` lists both
+`cursor` and `frame_demand`, and the `window.rs` line in
+`script/upstream-allowlist` now carries the frame-demand hooks alongside
+the cursor exception, with the numbers from #137 (`added=48 removed=30`).
+
+**Once upstream merges either PR**, drop the corresponding commits here
+rather than keeping a duplicate: `git rebase --onto <upstream merge> <last
+backport commit> nyaterm`, then re-run Verification.
 
 ## Verification
 
