@@ -81,6 +81,7 @@ package = "zed-font-kit"
 version = "^0.1.14"
 default-features = false
 package = "gpui-fast"
+path = "../gpui"
 
 [dependencies.gpui_util]
 version = "=0.3.12"

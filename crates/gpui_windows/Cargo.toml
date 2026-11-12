@@ -55,6 +55,7 @@ doctest = false
 version = "^0.1.14"
 default-features = false
 package = "gpui-fast"
+path = "../gpui"
 
 [target.'cfg(target_os = "windows")'.dependencies.accesskit]
 version = "0.24.0"

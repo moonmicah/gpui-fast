@@ -135,6 +135,7 @@ version = "0.3.34"
 version = "^0.1.14"
 default-features = false
 package = "gpui-fast"
+path = "../gpui"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui_util]
 version = "=0.3.12"
@@ -145,6 +146,7 @@ version = "^0.1.14"
 features = ["font-kit"]
 optional = true
 package = "gpui-fast-wgpu"
+path = "../gpui_wgpu"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.http_client]
 version = "=0.3.12"

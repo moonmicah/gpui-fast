@@ -59,6 +59,7 @@ doctest = false
 version = "^0.1.14"
 default-features = false
 package = "gpui-fast"
+path = "../gpui"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.anyhow]
 version = "1.0.86"

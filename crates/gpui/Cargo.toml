@@ -160,6 +160,7 @@ optional = true
 [dependencies.gpui_macros]
 version = "^0.1.14"
 package = "gpui-fast-macros"
+path = "../gpui_macros"
 
 [dependencies.gpui_shared_string]
 version = "=0.3.12"

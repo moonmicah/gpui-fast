@@ -65,6 +65,7 @@ doctest = false
 version = "^0.1.14"
 default-features = false
 package = "gpui-fast"
+path = "../gpui"
 
 [target.'cfg(target_os = "macos")'.dependencies.accesskit]
 version = "0.24.0"
@@ -113,6 +114,8 @@ version = "0.3.34"
 [target.'cfg(target_os = "macos")'.dependencies.gpui_apple]
 version = "^0.1.14"
 package = "gpui-fast-apple"
+path = "../gpui_apple"
+features = ["runtime_shaders"]
 
 [target.'cfg(target_os = "macos")'.dependencies.gpui_util]
 version = "=0.3.12"
