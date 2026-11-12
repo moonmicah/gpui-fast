@@ -28,6 +28,8 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
+pub(crate) const WM_GPUI_NATIVE_DRAG_ENDED: u32 = WM_USER + 11;
+pub(crate) const WM_GPUI_POINTER_CANCELLED: u32 = WM_USER + 12;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -87,7 +89,43 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if matches!(
+            msg,
+            WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED | WM_SHOWWINDOW | WM_ACTIVATE | WM_DPICHANGED
+        ) {
+            if let Ok(overlay) = self.state.native_overlay.try_borrow() {
+                if let Some(overlay) = overlay.as_ref() {
+                    overlay.sync();
+                }
+            }
+        }
         let handled = match msg {
+            crate::native_overlay::WM_NATIVE_CHILD_MOUSE_DOWN => {
+                if let Some(mut callback) = self.state.callbacks.native_child_mouse_down.take() {
+                    let button = match wparam.0 as u32 {
+                        WM_LBUTTONDOWN => MouseButton::Left,
+                        WM_RBUTTONDOWN => MouseButton::Right,
+                        WM_MBUTTONDOWN => MouseButton::Middle,
+                        _ => MouseButton::Navigate(NavigationDirection::Back),
+                    };
+                    callback(MouseDownEvent {
+                        button,
+                        position: logical_point(
+                            lparam.signed_loword() as f32,
+                            lparam.signed_hiword() as f32,
+                            self.state.scale_factor.get(),
+                        ),
+                        modifiers: current_modifiers(),
+                        click_count: 1,
+                        first_mouse: false,
+                    });
+                    self.state
+                        .callbacks
+                        .native_child_mouse_down
+                        .set(Some(callback));
+                }
+                Some(0)
+            }
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
             // The GPUI event is dispatched in between, so a click handler runs while `active_window` is still
@@ -157,6 +195,10 @@ impl WindowsWindowInner {
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
+            WM_GPUI_NATIVE_DRAG_ENDED => self.handle_native_drag_ended(wparam),
+            WM_GPUI_POINTER_CANCELLED => self.handle_pointer_cancelled_msg(wparam),
+            WM_CAPTURECHANGED => self.handle_capture_changed(handle, lparam),
+            WM_CANCELMODE => self.handle_cancel_mode(handle),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
             WM_GPUI_CURSOR_STYLE_CHANGED
@@ -169,6 +211,80 @@ impl WindowsWindowInner {
         } else {
             unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
         }
+    }
+
+    /// An outbound OLE drag finished. Running the gesture in a separate COM
+    /// apartment detaches its input queue, which resets the keyboard state, so
+    /// reconcile held modifiers before input returns to this window and then
+    /// let the UI tear down its drag session.
+    fn handle_native_drag_ended(&self, wparam: WPARAM) -> Option<isize> {
+        if wparam.0 != self.validation_number {
+            log::error!("Wrong validation number while processing native drag end");
+            return None;
+        }
+        let mut keyboard = [0_u8; 256];
+        if unsafe { GetKeyboardState(&mut keyboard) }
+            .log_err()
+            .is_some()
+        {
+            for (key, state) in keyboard.iter_mut().enumerate() {
+                let pressed = unsafe { GetAsyncKeyState(key as i32) } < 0;
+                *state = (*state & 1) | if pressed { 0x80 } else { 0 };
+            }
+            unsafe { SetKeyboardState(&keyboard) }.log_err();
+        }
+        if let Some(mut callback) = self.state.callbacks.input.take() {
+            callback(PlatformInput::FileDrop(FileDropEvent::Ended));
+            self.state.callbacks.input.set(Some(callback));
+        }
+        Some(0)
+    }
+
+    /// Win32 reported that mouse capture moved. `lparam` is the window that took
+    /// it, or zero when capture was simply released; only a transfer to another
+    /// window means this one lost a gesture it was still tracking.
+    fn handle_capture_changed(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+        let expected = self.suppress_capture_cancel.replace(false);
+        if !expected && lparam.0 != handle.0 as isize {
+            self.queue_pointer_cancel(handle, PointerCancelReason::CaptureLost);
+        }
+        Some(0)
+    }
+
+    /// The system is taking over the interaction (menu, alt-tab, modal loop).
+    fn handle_cancel_mode(&self, handle: HWND) -> Option<isize> {
+        self.queue_pointer_cancel(handle, PointerCancelReason::CancelMode);
+        Some(0)
+    }
+
+    /// Cancellation is posted rather than dispatched inline: these arrive from
+    /// inside `ReleaseCapture` and other modal Win32 calls, where re-entering
+    /// GPUI would see half-torn-down pointer state.
+    fn queue_pointer_cancel(&self, handle: HWND, reason: PointerCancelReason) {
+        unsafe {
+            PostMessageW(
+                Some(handle),
+                WM_GPUI_POINTER_CANCELLED,
+                WPARAM(reason as usize),
+                LPARAM(0),
+            )
+        }
+        .log_err();
+    }
+
+    fn handle_pointer_cancelled_msg(&self, wparam: WPARAM) -> Option<isize> {
+        let reason = if wparam.0 == 0 {
+            PointerCancelReason::CaptureLost
+        } else {
+            PointerCancelReason::CancelMode
+        };
+        if let Some(mut callback) = self.state.callbacks.input.take() {
+            callback(PlatformInput::PointerCancelled(PointerCancelEvent {
+                reason,
+            }));
+            self.state.callbacks.input.set(Some(callback));
+        }
+        Some(0)
     }
 
     fn handle_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
@@ -509,7 +625,10 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
+        // This release is intentional; don't report it as a lost gesture.
+        self.suppress_capture_cancel.set(true);
         unsafe { ReleaseCapture().log_err() };
+        self.suppress_capture_cancel.set(false);
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);

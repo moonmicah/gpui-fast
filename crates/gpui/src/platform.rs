@@ -575,6 +575,11 @@ pub trait Platform: 'static {
 
     fn set_cursor_style(&self, style: CursorStyle);
 
+    /// Hides the mouse cursor entirely. Unlike a [`CursorStyle`], which swaps
+    /// the shape, this leaves no native pointer on screen at all; platforms
+    /// that cannot express it keep the current shape.
+    fn set_cursor_hidden(&self) {}
+
     /// Hides the mouse cursor until the user moves the mouse over one of
     /// this application's windows.
     fn hide_cursor_until_mouse_moves(&self);
@@ -1344,6 +1349,17 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     ) -> Result<()> {
         crate::fast::composition::unsupported("surface ordering")
     }
+    /// Enable transparent owned-window presentation above native child windows.
+    /// Unsupported platforms must report failure rather than hiding children.
+    fn set_native_child_surface_mode(&self, enabled: bool) -> Result<()> {
+        anyhow::ensure!(!enabled, "native child overlay presentation is unavailable");
+        Ok(())
+    }
+    /// Interactive client-coordinate regions of the transparent overlay.
+    fn set_native_overlay_regions(&self, _regions: &[Bounds<Pixels>]) {}
+    /// Observe a native child's original mouse-down before it is delivered.
+    /// This callback must not synthesize or replay the input to the child.
+    fn on_native_child_mouse_down(&self, _callback: Box<dyn FnMut(crate::MouseDownEvent)>) {}
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
@@ -1394,6 +1410,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn show_window_menu(&self, _position: Point<Pixels>) {}
     fn start_window_move(&self) {}
     fn can_start_external_drag(&self) -> bool {
+        false
+    }
+    /// Whether the platform can advertise files whose contents are produced on
+    /// demand by the application instead of residing on disk.
+    fn supports_virtual_file_drag(&self) -> bool {
+        false
+    }
+    /// Whether the platform can write files into paths chosen by the receiver.
+    fn supports_file_promise_drag(&self) -> bool {
         false
     }
     fn start_external_drag(&self, _payload: &ExternalDragPayload) -> bool {
@@ -2617,6 +2642,10 @@ pub enum TextInputAction {
 /// The variables that can be configured when creating a new window
 #[derive(Debug)]
 pub struct WindowOptions {
+    /// Reserve support for native child surfaces on Windows. This must be
+    /// selected at creation because Windows cannot change redirection later.
+    /// Other platforms ignore this option. Defaults to false.
+    pub native_child_surfaces: bool,
     /// Specifies the state and bounds of the window in screen coordinates.
     /// - `None`: Inherit the bounds.
     /// - `Some(WindowBounds)`: Open a window with corresponding state and its restore size.
@@ -2714,6 +2743,8 @@ pub struct WindowOptions {
 )]
 #[allow(missing_docs)]
 pub struct WindowParams {
+    #[cfg(target_os = "windows")]
+    pub native_child_surfaces: bool,
     pub bounds: Bounds<Pixels>,
 
     /// The titlebar configuration of the window
@@ -2809,6 +2840,7 @@ impl WindowBounds {
 impl Default for WindowOptions {
     fn default() -> Self {
         Self {
+            native_child_surfaces: false,
             window_bounds: None,
             titlebar: Some(TitlebarOptions {
                 title: Default::default(),

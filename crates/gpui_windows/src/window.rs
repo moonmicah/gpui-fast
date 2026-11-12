@@ -66,6 +66,13 @@ pub struct WindowsWindowState {
     pub direct_manipulation: DirectManipulationHandler,
 
     pub renderer: RefCell<DirectXRenderer>,
+    pub(crate) native_overlay: RefCell<Option<crate::native_overlay::NativeOverlayWindow>>,
+    native_overlay_failures: Cell<u8>,
+    /// Whether GPUI has ordered the window's composition surfaces, in which
+    /// case `fast::composition` owns the `IDCompositionTarget` root that the
+    /// native overlay would have to take over. Mirrors
+    /// `fast::composition::DirectXComposition::base` being `Some`.
+    pub(crate) composition_ordered: Cell<bool>,
     /// Set when the next `draw_window` call must be treated as a forced
     /// render. Used after a GPU device-lost recovery, where the next frame
     /// must both re-enable drawing (via `mark_drawable`) and bypass the GPUI
@@ -107,6 +114,13 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) is_minimizable: bool,
     pub(crate) executor: ForegroundExecutor,
     pub(crate) validation_number: usize,
+    /// Kept alive for the whole window lifetime and handed to an outbound OLE
+    /// drag as a `Weak`, so a running drag can detect window teardown.
+    drag_lifetime: RefCell<Option<Arc<()>>>,
+    /// Set while this window releases mouse capture on purpose. Win32 sends
+    /// `WM_CAPTURECHANGED` for that too, and treating it as a lost gesture
+    /// would cancel the drag that just finished normally.
+    pub(crate) suppress_capture_cancel: Cell<bool>,
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
     pub(crate) parent_hwnd: Option<HWND>,
@@ -183,6 +197,9 @@ impl WindowsWindowState {
             hovered: Cell::new(hovered),
             last_visibility: Cell::new(None),
             renderer: RefCell::new(renderer),
+            native_overlay: RefCell::new(None),
+            native_overlay_failures: Cell::new(0),
+            composition_ordered: Cell::new(false),
             force_render_pending: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
@@ -300,6 +317,8 @@ impl WindowsWindowInner {
             is_minimizable: context.is_minimizable,
             executor: context.executor.clone(),
             validation_number: context.validation_number,
+            drag_lifetime: RefCell::new(Some(Arc::new(()))),
+            suppress_capture_cancel: Cell::new(false),
             main_receiver: context.main_receiver.clone(),
             platform_window_handle: context.platform_window_handle,
             system_settings: WindowsSystemSettings::new(),
@@ -404,6 +423,7 @@ impl WindowsWindowInner {
 pub(crate) struct Callbacks {
     pub(crate) request_frame: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
     pub(crate) input: Cell<Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>>,
+    pub(crate) native_child_mouse_down: Cell<Option<Box<dyn FnMut(MouseDownEvent)>>>,
     pub(crate) active_status_change: Cell<Option<Box<dyn FnMut(bool)>>>,
     pub(crate) visibility_change: Cell<Option<Box<dyn FnMut(WindowVisibility)>>>,
     pub(crate) hovered_status_change: Cell<Option<Box<dyn FnMut(bool)>>>,
@@ -516,7 +536,7 @@ impl WindowsWindow {
 
             (dwexstyle, dwstyle)
         };
-        if !disable_direct_composition {
+        if !disable_direct_composition && !params.native_child_surfaces {
             dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
         }
 
@@ -614,8 +634,23 @@ impl rwh::HasDisplayHandle for WindowsWindow {
     }
 }
 
+impl WindowsWindow {
+    /// Hands pointer capture back to the system before a native drag takes over
+    /// the gesture. Without this the OLE session never sees the button state it
+    /// needs to end the drag.
+    fn release_pointer_capture(&self) {
+        self.0.suppress_capture_cancel.set(true);
+        unsafe { ReleaseCapture().log_err() };
+        self.0.suppress_capture_cancel.set(false);
+    }
+}
+
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
+        // Dropping the lifetime token tells an in-flight OLE drag session that
+        // its source window is gone, so providers stop instead of reading from
+        // a torn-down application.
+        self.0.drag_lifetime.borrow_mut().take();
         self.0.dialog_owner.close();
         unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
         // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
@@ -644,6 +679,36 @@ impl PlatformWindow for WindowsWindow {
 
     fn is_maximized(&self) -> bool {
         self.state.is_maximized()
+    }
+
+    /// The published crate leaves this at the trait default (`false`), which
+    /// makes `Window::promote_external_drag_to_platform` drop every outbound
+    /// file drag on the floor. `external_drag` implements the missing shell
+    /// side, so the gesture can leave the window for real.
+    fn can_start_external_drag(&self) -> bool {
+        true
+    }
+
+    /// `external_drag` advertises `FileGroupDescriptorW` plus one
+    /// `FileContents` stream per file, so remote (SFTP) selections can leave
+    /// the window without first being written to disk.
+    fn supports_virtual_file_drag(&self) -> bool {
+        true
+    }
+
+    fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
+        let lifetime = self.0.drag_lifetime.borrow();
+        let Some(lifetime) = lifetime.as_ref() else {
+            return false;
+        };
+        // GPUI has captured the gesture; OLE's drag apartment takes it over.
+        self.release_pointer_capture();
+        crate::external_drag::start(
+            payload.clone(),
+            Arc::downgrade(lifetime),
+            self.0.hwnd.0 as isize,
+            self.0.validation_number,
+        )
     }
 
     fn window_bounds(&self) -> WindowBounds {
@@ -1050,12 +1115,70 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        self.state
+        if let Some(overlay) = self.state.native_overlay.borrow().as_ref() {
+            overlay.sync();
+        }
+        let result = self
+            .state
             .renderer
             .borrow_mut()
-            .draw(scene, self.state.background_appearance.get())
-            .log_err();
+            .draw(scene, self.state.background_appearance.get());
+        if result.is_err() && self.state.native_overlay.borrow().is_some() {
+            self.state
+                .native_overlay_failures
+                .set(self.state.native_overlay_failures.get().saturating_add(1));
+        }
+        if result.is_ok() {
+            self.state.native_overlay_failures.set(0);
+        }
+        result.log_err();
         crate::fast::frame_schedule::schedule_frame(self);
+    }
+
+    fn set_native_child_surface_mode(&self, enabled: bool) -> Result<()> {
+        if enabled {
+            anyhow::ensure!(
+                self.state.native_overlay_failures.get() < 3,
+                "native overlay composition failed; native presentation is unavailable"
+            );
+            // `fast::composition` and the overlay both take over the window's
+            // `IDCompositionTarget` root, so they cannot be used together.
+            anyhow::ensure!(
+                !self.state.composition_ordered.get(),
+                "native overlay is incompatible with window composition"
+            );
+            if self.state.native_overlay.borrow().is_some() {
+                return Ok(());
+            }
+            let overlay = crate::native_overlay::NativeOverlayWindow::new(self.hwnd)?;
+            let result = self
+                .state
+                .renderer
+                .borrow_mut()
+                .set_native_overlay(Some(overlay.hwnd()));
+            if let Err(error) = result {
+                let _ = self.state.renderer.borrow_mut().set_native_overlay(None);
+                return Err(error);
+            }
+            *self.state.native_overlay.borrow_mut() = Some(overlay);
+        } else {
+            self.state.renderer.borrow_mut().set_native_overlay(None)?;
+            self.state.native_overlay.borrow_mut().take();
+        }
+        Ok(())
+    }
+
+    fn set_native_overlay_regions(&self, regions: &[Bounds<Pixels>]) {
+        if let Some(overlay) = self.state.native_overlay.borrow().as_ref() {
+            overlay.set_regions(regions, self.state.scale_factor.get());
+        }
+    }
+
+    fn on_native_child_mouse_down(&self, callback: Box<dyn FnMut(MouseDownEvent)>) {
+        self.state
+            .callbacks
+            .native_child_mouse_down
+            .set(Some(callback));
     }
 
     fn draw_composed(&self, scene: ComposedScene<'_>) {
@@ -1072,7 +1195,11 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn set_composition_order(&self, surfaces: &[PlatformCompositionSurface]) -> anyhow::Result<()> {
-        crate::fast::composition::set_composition_order(self, surfaces)
+        let result = crate::fast::composition::set_composition_order(self, surfaces);
+        if result.is_ok() {
+            self.state.composition_ordered.set(true);
+        }
+        result
     }
 
     #[cfg(feature = "test-support")]
@@ -1176,7 +1303,7 @@ impl accesskit::ActionHandler for A11yActionHandler {
 }
 
 #[implement(IDropTarget)]
-struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
+struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>, pub Cell<bool>);
 
 impl WindowsDragDropHandler {
     fn handle_drag_drop(&self, input: PlatformInput) {
@@ -1206,7 +1333,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 tymed: TYMED_HGLOBAL.0 as _,
             };
             let cursor_position = POINT { x: pt.x, y: pt.y };
+            self.1.set(false);
             if idata_obj.QueryGetData(&config as _) == S_OK {
+                self.1.set(true);
                 *pdweffect = DROPEFFECT_COPY;
                 let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
                     return Ok(());
@@ -1236,6 +1365,19 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                     paths: ExternalPaths(paths),
                 });
                 self.handle_drag_drop(input);
+            } else if crate::external_drag::is_source_drag(&idata_obj, self.0.validation_number) {
+                // Our own outbound drag came back over the window. Its files
+                // live behind deferred providers rather than on disk, so report
+                // a copy target without inventing paths for them.
+                self.1.set(true);
+                *pdweffect = DROPEFFECT_COPY;
+                let mut position = cursor_position;
+                ScreenToClient(self.0.hwnd, &mut position).ok().log_err();
+                let scale_factor = self.0.state.scale_factor.get();
+                self.handle_drag_drop(PlatformInput::FileDrop(FileDropEvent::Entered {
+                    position: logical_point(position.x as f32, position.y as f32, scale_factor),
+                    paths: ExternalPaths::default(),
+                }));
             } else {
                 *pdweffect = DROPEFFECT_NONE;
             }
@@ -1253,6 +1395,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if !self.1.get() {
+            unsafe {
+                *pdweffect = DROPEFFECT_NONE;
+            }
+            return Ok(());
+        }
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
@@ -1278,6 +1426,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        self.1.set(false);
         unsafe {
             self.0.drop_target_helper.DragLeave().log_err();
         }
@@ -1294,6 +1443,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if !self.1.replace(false) {
+            unsafe {
+                *pdweffect = DROPEFFECT_NONE;
+            }
+            return Ok(());
+        }
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
@@ -1549,7 +1704,7 @@ fn get_module_handle() -> HMODULE {
 
 fn register_drag_drop(window: &Rc<WindowsWindowInner>) -> Result<()> {
     let window_handle = window.hwnd;
-    let handler = WindowsDragDropHandler(window.clone());
+    let handler = WindowsDragDropHandler(window.clone(), Cell::new(false));
     // The lifetime of `IDropTarget` is handled by Windows, it won't release until
     // we call `RevokeDragDrop`.
     // So, it's safe to drop it here.

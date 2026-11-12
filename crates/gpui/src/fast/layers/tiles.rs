@@ -38,10 +38,10 @@ pub(crate) fn tile_hashes(
     let mut open_layers: Vec<Bounds<ScaledPixels>> = Vec::new();
     for operation in &content.paint_operations {
         match operation {
-            PaintOperation::Primitive(primitive) => {
+            PaintOperation::Primitive(primitive, on_overlay) => {
                 let visible = visible_bounds(primitive);
                 for_tiles(&mut hashers, visible, tile_size, |hasher, origin| {
-                    hasher.write_u8(0);
+                    hasher.write_u8(if *on_overlay { 3 } else { 0 });
                     hash_primitive(&translate_primitive(primitive, origin), &tile, hasher);
                 });
             }
@@ -102,14 +102,14 @@ pub(crate) fn part_tile_hashes(
     let mut reach: Option<Bounds<ScaledPixels>> = None;
     for operation in operations {
         match operation {
-            PaintOperation::Primitive(primitive) => {
+            PaintOperation::Primitive(primitive, on_overlay) => {
                 let drawn = drawn_bounds(primitive);
                 let visible = drawn.intersect(&primitive.content_mask().bounds);
                 if visible.size.width.0 <= 0. || visible.size.height.0 <= 0. {
                     continue;
                 }
                 reach = Some(reach.map_or(visible, |reach| reach.union(&visible)));
-                hasher.write_u8(0);
+                hasher.write_u8(if *on_overlay { 3 } else { 0 });
                 hash_primitive(primitive, &drawn, &mut hasher);
             }
             PaintOperation::StartLayer(_) => hasher.write_u8(1),

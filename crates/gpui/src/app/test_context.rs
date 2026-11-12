@@ -909,6 +909,19 @@ impl VisualTestContext {
         self.cx.test_window(self.window).0.lock().title.clone()
     }
 
+    /// Connect a simulated accessibility client and draw the resulting tree.
+    /// Returns false if accessibility was disabled before the window opened.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn activate_accessibility(&mut self) -> bool {
+        if self.cx.app.borrow().accessibility_force_disabled {
+            return false;
+        }
+        self.update(|window, _| window.set_a11y_active_for_tests(true));
+        self.run_until_parked();
+        self.update(|window, cx| window.draw(cx).clear(cx));
+        true
+    }
+
     /// Read the document path off the window (set by `Window#set_document_path`)
     pub fn document_path(&mut self) -> Option<std::path::PathBuf> {
         self.cx

@@ -12,9 +12,10 @@ use gpui::{
     ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    PlatformInputHandler, PlatformWindow, Point, PointerCancelEvent, PointerCancelReason,
+    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
+    WindowParams, WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -305,6 +306,7 @@ unsafe fn build_classes() {
             );
             decl.register()
         };
+        crate::file_promise_drag::build_promise_classes();
     }
 }
 
@@ -2290,8 +2292,56 @@ impl PlatformWindow for MacWindow {
         true
     }
 
+    fn supports_file_promise_drag(&self) -> bool {
+        true
+    }
+
     fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
-        let ExternalDragPayload::Files(paths) = payload;
+        use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
+
+        let paths = match payload {
+            ExternalDragPayload::Files(paths) => paths,
+            ExternalDragPayload::PromisedFiles(files) => {
+                let (native_view, last_left_mouse_down_event, foreground_executor) = {
+                    let state = self.0.lock();
+                    (
+                        state.native_view.as_ptr(),
+                        state.last_left_mouse_down_event.clone(),
+                        state.foreground_executor.clone(),
+                    )
+                };
+
+                let Some(last_left_mouse_down_event) = last_left_mouse_down_event else {
+                    log::warn!("start_external_drag declined: no retained left mouse down event");
+                    return false;
+                };
+
+                let started = unsafe {
+                    crate::file_promise_drag::start_promise_drag(
+                        native_view,
+                        Retained::as_ptr(&last_left_mouse_down_event)
+                            .cast_mut()
+                            .cast(),
+                        files,
+                        foreground_executor,
+                    )
+                };
+                if started {
+                    self.0.lock().synthetic_drag_counter += 1;
+                }
+                return started;
+            }
+            // Neither payload has a macOS bridge: the engine's virtual file
+            // drag is Windows-only, and its deferred tree is not negotiated
+            // with any macOS receiver.
+            ExternalDragPayload::VirtualFiles(_) | ExternalDragPayload::VirtualFileTree(_) => {
+                log::warn!(
+                    "start_external_drag declined: virtual file drag is not implemented on macOS"
+                );
+                return false;
+            }
+        };
+
         if paths.entries().is_empty() {
             log::warn!("start_external_drag declined: no paths");
             return false;
@@ -3266,6 +3316,24 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     let executor = lock.foreground_executor.clone();
     drop(lock);
     crate::fast::composition::window_activation_changed(&window_state, is_active);
+
+    // Losing key status during a press hands the gesture to another window, and
+    // AppKit then never delivers the matching mouse-up here. Report the cancel
+    // so the application drops its drag, preview and pointer capture instead of
+    // staying stuck on a button that will never be released.
+    let pending_press = {
+        let mut lock = window_state.lock();
+        !is_active && lock.last_left_mouse_down_event.take().is_some()
+    };
+    if pending_press {
+        let callback = window_state.lock().event_callback.take();
+        if let Some(mut callback) = callback {
+            callback(PlatformInput::PointerCancelled(PointerCancelEvent {
+                reason: PointerCancelReason::CaptureLost,
+            }));
+            window_state.lock().event_callback = Some(callback);
+        }
+    }
 
     let a11y_events = {
         let mut lock = window_state.lock();

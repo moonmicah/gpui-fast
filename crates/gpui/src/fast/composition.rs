@@ -518,7 +518,7 @@ impl Scene {
                         "source scene closes a layer that is not open"
                     );
                 }
-                PaintOperation::Primitive(_) => {}
+                PaintOperation::Primitive(_, _) => {}
                 PaintOperation::FastRoundedClip(clip) => {
                     crate::fast::rounded_clip::track(*clip, &mut active_clips)?
                 }
@@ -537,7 +537,11 @@ impl Scene {
         }
         for operation in operations {
             match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                PaintOperation::Primitive(primitive, on_overlay) => {
+                    let previous = self.set_native_overlay(*on_overlay);
+                    self.insert_primitive(primitive.clone());
+                    self.set_native_overlay(previous);
+                }
                 PaintOperation::StartLayer(bounds) => {
                     active_layers.push(*bounds);
                     self.push_layer(*bounds);
@@ -2023,7 +2027,7 @@ mod tests {
             [
                 PaintOperation::StartLayer(_),
                 PaintOperation::StartLayer(_),
-                PaintOperation::Primitive(_),
+                PaintOperation::Primitive(_, _),
                 PaintOperation::EndLayer,
                 PaintOperation::EndLayer
             ]

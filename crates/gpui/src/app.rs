@@ -3015,6 +3015,18 @@ impl App {
         self.active_drag.is_some()
     }
 
+    /// Whether an in-app drag is in progress. Native drags the platform owns
+    /// are excluded, as are drags carrying external paths.
+    pub fn has_internal_drag(&self) -> bool {
+        self.platform_owned_drag.is_none()
+            && self.active_drag.as_ref().is_some_and(|drag| {
+                drag.value
+                    .as_ref()
+                    .downcast_ref::<crate::ExternalPaths>()
+                    .is_none()
+            })
+    }
+
     /// Gets the cursor style of the currently active drag operation.
     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)

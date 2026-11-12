@@ -139,6 +139,19 @@ pub(crate) struct A11yLog {
 }
 
 impl A11yLog {
+    /// How many ops have been logged so far, for [`Self::rollback_to`].
+    #[inline]
+    pub(crate) fn ops_len(log: &Self) -> usize {
+        log.ops.len()
+    }
+
+    /// Forgets the ops logged since `len`, for a prepaint `Window::transact`
+    /// retries: the node ids they name are pushed again by the retry.
+    #[inline]
+    pub(crate) fn rollback_to(log: &mut Self, len: usize) {
+        log.ops.truncate(len);
+    }
+
     #[inline]
     pub(crate) fn push(log: &mut Self, id: NodeId) {
         if log.recording {
@@ -529,7 +542,7 @@ pub(crate) fn layer_needs_repaint(window: &Window, stretch: Option<&A11yStretch>
     window.a11y.is_active() && stretch.is_none_or(|stretch| stretch.placed_synthetic)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Window {
     /// Makes the window build its accessibility tree from the next frame on
     /// as though assistive technology had asked for it, or stop.

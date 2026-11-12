@@ -193,6 +193,11 @@ pub(crate) struct MacPlatformState {
     keyboard_mapper: Rc<MacKeyboardMapper>,
     /// Mirrors `[NSCursor setHiddenUntilMouseMoves:]` state, which AppKit doesn't expose.
     cursor_visible: Arc<AtomicBool>,
+    /// Whether this platform currently holds a `[NSCursor hide]` on the stack.
+    ///
+    /// AppKit counts hide/unhide pairs, so the platform hides once and only
+    /// unhides when a frame stops asking for a hidden pointer.
+    cursor_hidden: bool,
     system_notifications: crate::system_notifications::SystemNotificationState,
 }
 
@@ -262,6 +267,7 @@ impl MacPlatform {
             menus: None,
             keyboard_mapper,
             cursor_visible: Arc::new(AtomicBool::new(true)),
+            cursor_hidden: false,
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
         });
         Self(state, marker)
@@ -1183,7 +1189,24 @@ impl Platform for MacPlatform {
     /// in macOS's [NSCursor](https://developer.apple.com/documentation/appkit/nscursor).
     fn set_cursor_style(&self, style: CursorStyle) {
         unsafe {
+            // A surface that hides the pointer (remote desktop paints its own)
+            // must not leave AppKit's hide on the stack once it stops asking.
+            if std::mem::take(&mut self.0.lock().cursor_hidden) {
+                let _: () = msg_send![class!(NSCursor), unhide];
+            }
             set_active_window_cursor_style(style);
+        }
+    }
+
+    /// Removes the native pointer while a frame draws its own.
+    fn set_cursor_hidden(&self) {
+        let mut state = self.0.lock();
+        if state.cursor_hidden {
+            return;
+        }
+        state.cursor_hidden = true;
+        unsafe {
+            let _: () = msg_send![class!(NSCursor), hide];
         }
     }
 

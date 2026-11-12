@@ -44,6 +44,8 @@ pub(crate) struct DirectXRenderer {
     pub(crate) globals: DirectXGlobalElements,
     pub(crate) pipelines: DirectXRenderPipelines,
     pub(crate) direct_composition: Option<DirectComposition>,
+    overlay_hwnd: Option<HWND>,
+    overlay_target: Option<OverlayTarget>,
     font_info: &'static FontInfo,
 
     pub(crate) width: u32,
@@ -121,7 +123,16 @@ impl Drop for Annotation<'_> {
 pub(crate) struct DirectComposition {
     pub(crate) comp_device: IDCompositionDevice,
     pub(crate) comp_target: IDCompositionTarget,
+    alternate_target: Option<IDCompositionTarget>,
     pub(crate) comp_visual: IDCompositionVisual,
+    above_children: bool,
+}
+
+struct OverlayTarget {
+    resources: Option<DirectXResources>,
+    _composition: DirectComposition,
+    width: u32,
+    height: u32,
 }
 
 impl DirectXRendererDevices {
@@ -194,6 +205,8 @@ impl DirectXRenderer {
             globals,
             pipelines,
             direct_composition,
+            overlay_hwnd: None,
+            overlay_target: None,
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -274,6 +287,9 @@ impl DirectXRenderer {
         crate::fast::layers::release_tiles(self);
         crate::fast::composition::release(self);
         let disable_direct_composition = self.direct_composition.is_none();
+        // Keep the owned HWND but rebuild its resources with the recovered
+        // device and the owner's atlas on the next frame.
+        self.overlay_target.take();
 
         unsafe {
             #[cfg(debug_assertions)]
@@ -316,8 +332,9 @@ impl DirectXRenderer {
         let direct_composition = if disable_direct_composition {
             None
         } else {
-            let composition =
+            let mut composition =
                 DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), self.hwnd)?;
+            composition.set_above_children(self.hwnd, self.overlay_hwnd.is_none())?;
             composition.set_swap_chain(&resources.swap_chain)?;
             Some(composition)
         };
@@ -340,6 +357,53 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    pub(crate) fn set_native_overlay(&mut self, hwnd: Option<HWND>) -> Result<()> {
+        anyhow::ensure!(
+            hwnd.is_none() || self.direct_composition.is_some(),
+            "native child overlays require DirectComposition"
+        );
+        if let Some(composition) = self.direct_composition.as_mut() {
+            // The owner scene must sit below HWND children. Only the separate
+            // owned popup presents explicitly scoped menus and dialogs above them.
+            composition.set_above_children(self.hwnd, hwnd.is_none())?;
+        }
+        self.overlay_target.take();
+        self.overlay_hwnd = hwnd;
+        self.ensure_overlay_target()
+    }
+
+    fn ensure_overlay_target(&mut self) -> Result<()> {
+        let Some(hwnd) = self.overlay_hwnd else {
+            return Ok(());
+        };
+        if self
+            .overlay_target
+            .as_ref()
+            .is_some_and(|target| target.width == self.width && target.height == self.height)
+        {
+            return Ok(());
+        }
+        self.overlay_target.take();
+        let devices = self.devices.as_ref().context("missing overlay device")?;
+        let resources =
+            DirectXResources::new(devices, self.width.max(1), self.height.max(1), hwnd, false)?;
+        let composition = DirectComposition::new(
+            devices
+                .dxgi_device
+                .as_ref()
+                .context("missing composition device")?,
+            hwnd,
+        )?;
+        composition.set_swap_chain(&resources.swap_chain)?;
+        self.overlay_target = Some(OverlayTarget {
+            resources: Some(resources),
+            _composition: composition,
+            width: self.width,
+            height: self.height,
+        });
+        Ok(())
+    }
+
     pub(crate) fn draw(
         &mut self,
         scene: &Scene,
@@ -350,8 +414,27 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
-        self.render(scene, background_appearance)?;
-        self.present()
+        if self.overlay_hwnd.is_none() {
+            self.render(scene, background_appearance)?;
+            return self.present();
+        }
+        self.ensure_overlay_target()?;
+        let (owner_scene, overlay_scene) = scene.native_child_layers();
+        self.render(&owner_scene, background_appearance)?;
+        self.present()?;
+        let mut target = self
+            .overlay_target
+            .take()
+            .context("missing native overlay target")?;
+        // Reuse the same atlas, device, pipeline and instance buffers. Only the
+        // swap chain/render targets differ, so glyph/image tile IDs stay valid.
+        std::mem::swap(&mut self.resources, &mut target.resources);
+        let result = self
+            .render(&overlay_scene, WindowBackgroundAppearance::Transparent)
+            .and_then(|()| self.present());
+        std::mem::swap(&mut self.resources, &mut target.resources);
+        self.overlay_target = Some(target);
+        result
     }
 
     /// Clear the render target for `background_appearance` and encode every
@@ -1039,8 +1122,47 @@ impl DirectComposition {
         Ok(Self {
             comp_device,
             comp_target,
+            alternate_target: None,
             comp_visual,
+            above_children: true,
         })
+    }
+
+    fn set_above_children(&mut self, hwnd: HWND, above_children: bool) -> Result<()> {
+        if self.above_children == above_children {
+            return Ok(());
+        }
+        unsafe {
+            // Keep the two HWND layers for repeated native-mode switches.
+            if self.alternate_target.is_none() {
+                self.alternate_target = Some(
+                    self.comp_device
+                        .CreateTargetForHwnd(hwnd, above_children)
+                        .context("create alternate composition target")?,
+                );
+            }
+            let target = self
+                .alternate_target
+                .as_mut()
+                .context("missing alternate composition target")?;
+            // A visual cannot be a root on both targets. Detach first, then
+            // attach and commit both changes together to avoid a blank frame.
+            self.comp_target
+                .SetRoot(None::<&IDCompositionVisual>)
+                .context("detach old composition root")?;
+            if let Err(error) = target
+                .SetRoot(&self.comp_visual)
+                .and_then(|()| self.comp_device.Commit())
+            {
+                target.SetRoot(None::<&IDCompositionVisual>).log_err();
+                self.comp_target.SetRoot(&self.comp_visual).log_err();
+                self.comp_device.Commit().log_err();
+                return Err(error).context("attach switched composition root and commit");
+            }
+            std::mem::swap(&mut self.comp_target, target);
+        }
+        self.above_children = above_children;
+        Ok(())
     }
 
     pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {

@@ -8,6 +8,7 @@ mod display;
 mod display_link;
 mod events;
 mod fast;
+mod file_promise_drag;
 mod keyboard;
 mod pasteboard;
 mod system_notifications;

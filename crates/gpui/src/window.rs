@@ -14,9 +14,9 @@ use crate::{
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    MonochromeSprite, MouseButton, MouseDownEvent, MouseEvent, MouseMoveEvent, MouseUpEvent, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
     Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
@@ -830,6 +830,17 @@ impl HitboxId {
     }
 }
 
+/// Input policy for content presented above native child windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeOverlayInput {
+    /// Only interactive hitboxes receive pointer input.
+    Region,
+    /// Visual content (for example tooltips and drag previews) passes input through.
+    Passive,
+    /// The entire client area blocks input to native children.
+    Modal,
+}
+
 /// A rectangular region that potentially blocks hitboxes inserted prior.
 /// See [Window::insert_hitbox] for more details.
 #[derive(Clone, Debug, Deref)]
@@ -843,6 +854,8 @@ pub struct Hitbox {
     pub content_mask: ContentMask<Pixels>,
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
+    /// Input policy of the native overlay scope which created this hitbox.
+    pub native_overlay_input: Option<NativeOverlayInput>,
 }
 
 impl Hitbox {
@@ -1026,6 +1039,7 @@ impl std::ops::Deref for ElementIdStack {
 pub(crate) struct DeferredDraw {
     pub(crate) current_view: EntityId,
     pub(crate) priority: usize,
+    pub(crate) native_overlay_input: NativeOverlayInput,
     pub(crate) parent_node: DispatchNodeId,
     pub(crate) element_id_stack: ElementIdStack,
     pub(crate) text_style_stack: crate::fast::text_style::TextStyleStack,
@@ -1057,6 +1071,8 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
+    /// Set by [`Window::set_window_cursor_hidden`] for this frame only.
+    pub(crate) cursor_hidden: bool,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1118,6 +1134,7 @@ impl Frame {
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
+            cursor_hidden: false,
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
@@ -1144,6 +1161,7 @@ impl Frame {
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
+        self.cursor_hidden = false;
         self.hitboxes.clear();
         crate::fast::composition::SurfaceInput::clear(&mut self.fast_composition_input);
         self.window_control_hitboxes.clear();
@@ -1187,6 +1205,9 @@ impl Frame {
         let mut set_hover_hitbox_count = false;
         let mut hit_test = HitTest::default();
         for hitbox in self.hitboxes.iter().rev() {
+            if hitbox.native_overlay_input == Some(NativeOverlayInput::Passive) {
+                continue;
+            }
             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
             if bounds.contains(&position) {
                 hit_test.ids.push(hitbox.id);
@@ -1277,6 +1298,10 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
+    native_child_surface_mode: bool,
+    native_overlay_input: Option<NativeOverlayInput>,
+    native_child_dispatch: bool,
+    native_overlay_outside_down: Option<Box<dyn FnMut(&MouseDownEvent, &mut Window, &mut App)>>,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
@@ -1664,6 +1689,8 @@ impl Window {
         cx: &mut App,
     ) -> Result<Self> {
         let WindowOptions {
+            #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+            native_child_surfaces,
             window_bounds,
             titlebar,
             focus,
@@ -1700,6 +1727,8 @@ impl Window {
         let mut platform_window = cx.platform.open_window(
             handle,
             WindowParams {
+                #[cfg(target_os = "windows")]
+                native_child_surfaces,
                 bounds: window_bounds.get_bounds(),
                 titlebar,
                 kind,
@@ -2273,6 +2302,20 @@ impl Window {
                     .unwrap_or(DispatchEventResult::default())
             })
         });
+        platform_window.on_native_child_mouse_down({
+            let mut cx = cx.to_async();
+            Box::new(move |event| {
+                handle
+                    .update(&mut cx, |_, window, cx| {
+                        window.mouse_position = event.position;
+                        window.native_child_dispatch = true;
+                        cx.propagate_event = true;
+                        window.dispatch_mouse_event(&event, cx);
+                        window.native_child_dispatch = false;
+                    })
+                    .log_err();
+            })
+        });
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
             Box::new(move || {
@@ -2407,6 +2450,10 @@ impl Window {
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
+            native_child_surface_mode: false,
+            native_overlay_input: None,
+            native_child_dispatch: false,
+            native_overlay_outside_down: None,
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
             dirty_views: FxHashSet::default(),
@@ -3877,6 +3924,27 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
+        if self.native_child_surface_mode {
+            let modal = self
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .any(|hitbox| hitbox.native_overlay_input == Some(NativeOverlayInput::Modal));
+            let regions = if modal {
+                vec![Bounds::new(Point::default(), self.viewport_size)]
+            } else {
+                self.rendered_frame
+                    .hitboxes
+                    .iter()
+                    .filter(|hitbox| {
+                        hitbox.native_overlay_input == Some(NativeOverlayInput::Region)
+                    })
+                    .map(|hitbox| hitbox.bounds.intersect(&hitbox.content_mask.bounds))
+                    .filter(|bounds| !bounds.is_empty())
+                    .collect()
+            };
+            self.platform_window.set_native_overlay_regions(&regions);
+        }
         crate::fast::composition::present(self);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
@@ -3887,6 +3955,42 @@ impl Window {
         );
         self.needs_present.set(false);
         profiling::finish_frame!();
+    }
+
+    /// Enable composition above native child windows. The caller must surface
+    /// failure before creating a child which could cover application overlays.
+    pub fn set_native_child_surface_mode(&mut self, enabled: bool) -> anyhow::Result<()> {
+        self.platform_window
+            .set_native_child_surface_mode(enabled)?;
+        if self.native_child_surface_mode != enabled {
+            self.native_child_surface_mode = enabled;
+            self.refresh();
+        }
+        Ok(())
+    }
+
+    /// Observe an original outside press before its normal target handles it.
+    /// The callback must not replay or consume the input.
+    pub fn on_native_overlay_outside_mouse_down(
+        &mut self,
+        callback: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) {
+        self.native_overlay_outside_down = Some(Box::new(callback));
+    }
+
+    /// Record layout hitboxes and paint operations for the same element tree
+    /// on the native overlay surface, preserving dispatch and focus ownership.
+    pub fn with_native_overlay<R>(
+        &mut self,
+        input: NativeOverlayInput,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_input = self.native_overlay_input.replace(input);
+        let previous_paint = self.next_frame.scene.set_native_overlay(true);
+        let result = f(self);
+        self.next_frame.scene.set_native_overlay(previous_paint);
+        self.native_overlay_input = previous_input;
+        result
     }
 
     /// Presents the most recently drawn frame if it hasn't been presented yet.
@@ -3999,13 +4103,21 @@ impl Window {
                 .as_mut()
                 .unwrap()
                 .stretch_auto_size_to_fill(prompt_layout_id, root_size, scale_factor);
-            element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+            self.with_native_overlay(NativeOverlayInput::Modal, |window| {
+                window.insert_hitbox(
+                    Bounds::new(Point::default(), root_size),
+                    HitboxBehavior::Normal,
+                );
+                element.prepaint_as_root(Point::default(), root_size.into(), window, cx);
+            });
             prompt_element = Some(element);
             self.prompt = Some(prompt);
         } else if let Some(active_drag) = cx.active_drag.take() {
             let mut element = active_drag.view.clone().into_any_element();
             let offset = self.mouse_position() - active_drag.cursor_offset;
-            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+            self.with_native_overlay(NativeOverlayInput::Passive, |window| {
+                element.prepaint_as_root(offset, AvailableSpace::min_size(), window, cx);
+            });
             active_drag_element = Some(element);
             cx.active_drag = Some(active_drag);
         } else {
@@ -4030,11 +4142,17 @@ impl Window {
         self.paint_deferred_draws(cx);
 
         if let Some(mut prompt_element) = prompt_element {
-            prompt_element.paint(self, cx);
+            self.with_native_overlay(NativeOverlayInput::Modal, |window| {
+                prompt_element.paint(window, cx)
+            });
         } else if let Some(mut drag_element) = active_drag_element {
-            drag_element.paint(self, cx);
+            self.with_native_overlay(NativeOverlayInput::Passive, |window| {
+                drag_element.paint(window, cx)
+            });
         } else if let Some(mut tooltip_element) = tooltip_element {
-            tooltip_element.paint(self, cx);
+            self.with_native_overlay(NativeOverlayInput::Passive, |window| {
+                tooltip_element.paint(window, cx)
+            });
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -4132,8 +4250,10 @@ impl Window {
                 continue;
             }
 
-            self.with_absolute_element_offset(tooltip_bounds.origin, |window| {
-                element.prepaint(window, cx)
+            self.with_native_overlay(NativeOverlayInput::Passive, |window| {
+                window.with_absolute_element_offset(tooltip_bounds.origin, |window| {
+                    element.prepaint(window, cx)
+                })
             });
 
             self.tooltip_bounds = Some(TooltipBounds {
@@ -4174,6 +4294,7 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
+                let input = self.next_frame.deferred_draws[deferred_draw_ix].native_overlay_input;
                 let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
@@ -4192,31 +4313,39 @@ impl Window {
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
 
                 let prepaint_start = self.prepaint_index();
-                if let Some(mut element) = element {
-                    let recording =
-                        crate::fast::retained::begin_deferred_prepaint(self, deferred_draw_ix, cx);
-                    let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
-                        self.with_rendered_view(current_view, |window| {
-                            window.with_rem_size(Some(rem_size), |window| {
-                                window.with_absolute_element_offset(absolute_offset, |window| {
-                                    element.prepaint(window, cx);
+                self.with_native_overlay(input, |window| {
+                    if let Some(mut element) = element {
+                        let recording = crate::fast::retained::begin_deferred_prepaint(
+                            window,
+                            deferred_draw_ix,
+                            cx,
+                        );
+                        let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
+                            window.with_rendered_view(current_view, |window| {
+                                window.with_rem_size(Some(rem_size), |window| {
+                                    window.with_absolute_element_offset(
+                                        absolute_offset,
+                                        |window| {
+                                            element.prepaint(window, cx);
+                                        },
+                                    );
                                 });
                             });
                         });
-                    });
-                    crate::fast::retained::finish_deferred(self, recording, cx);
-                    self.next_frame.deferred_draws[deferred_draw_ix].accessed_entities =
-                        accessed_entities;
-                    self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
-                } else {
-                    cx.entities.extend_accessed(
-                        self.next_frame.deferred_draws[deferred_draw_ix]
-                            .accessed_entities
-                            .iter()
-                            .copied(),
-                    );
-                    self.reuse_prepaint(prepaint_range);
-                }
+                        crate::fast::retained::finish_deferred(window, recording, cx);
+                        window.next_frame.deferred_draws[deferred_draw_ix].accessed_entities =
+                            accessed_entities;
+                        window.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
+                    } else {
+                        cx.entities.extend_accessed(
+                            window.next_frame.deferred_draws[deferred_draw_ix]
+                                .accessed_entities
+                                .iter()
+                                .copied(),
+                        );
+                        window.reuse_prepaint(prepaint_range);
+                    }
+                });
                 let prepaint_end = self.prepaint_index();
                 self.next_frame.deferred_draws[deferred_draw_ix].prepaint_range =
                     prepaint_start..prepaint_end;
@@ -4249,23 +4378,26 @@ impl Window {
 
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
-            if let Some(element) = deferred_draw.element.as_mut() {
-                let enclosing = &deferred_draw.enclosing_retained;
-                let recording = crate::fast::retained::begin_deferred_paint(self, enclosing, cx);
-                let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
-                    self.with_rendered_view(deferred_draw.current_view, |window| {
-                        window.with_content_mask(content_mask, |window| {
-                            window.with_rem_size(Some(deferred_draw.rem_size), |window| {
-                                element.paint(window, cx);
-                            });
-                        })
-                    })
-                });
-                crate::fast::retained::finish_deferred(self, recording, cx);
-                deferred_draw.accessed_entities.extend(accessed_entities);
-            } else {
-                self.reuse_paint(deferred_draw.paint_range.clone());
-            }
+            self.with_native_overlay(deferred_draw.native_overlay_input, |window| {
+                if let Some(element) = deferred_draw.element.as_mut() {
+                    let enclosing = &deferred_draw.enclosing_retained;
+                    let recording =
+                        crate::fast::retained::begin_deferred_paint(window, enclosing, cx);
+                    let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
+                        window.with_rendered_view(deferred_draw.current_view, |window| {
+                            window.with_content_mask(content_mask, |window| {
+                                window.with_rem_size(Some(deferred_draw.rem_size), |window| {
+                                    element.paint(window, cx);
+                                });
+                            })
+                        });
+                    });
+                    crate::fast::retained::finish_deferred(window, recording, cx);
+                    deferred_draw.accessed_entities.extend(accessed_entities);
+                } else {
+                    window.reuse_paint(deferred_draw.paint_range.clone());
+                }
+            });
             let paint_end = self.paint_index();
             deferred_draw.paint_range = paint_start..paint_end;
         }
@@ -4294,10 +4426,26 @@ impl Window {
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         crate::fast::a11y::reuse_prepaint(self, &range);
+        let scope = self.native_overlay_input;
+        let viewport = Bounds::new(Point::default(), self.viewport_size);
+        let native_mode = self.native_child_surface_mode;
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
-                .cloned(),
+                .cloned()
+                .map(|mut hitbox| {
+                    hitbox.native_overlay_input = match scope {
+                        Some(NativeOverlayInput::Passive | NativeOverlayInput::Modal) => scope,
+                        _ => hitbox.native_overlay_input.or(scope),
+                    };
+                    if native_mode
+                        && hitbox.native_overlay_input == Some(NativeOverlayInput::Region)
+                        && hitbox.bounds.intersect(&viewport) == viewport
+                    {
+                        hitbox.bounds = Bounds::default();
+                    }
+                    hitbox
+                }),
         );
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
@@ -4330,6 +4478,7 @@ impl Window {
                 .iter()
                 .map(|deferred_draw| DeferredDraw {
                     current_view: deferred_draw.current_view,
+                    native_overlay_input: deferred_draw.native_overlay_input,
                     parent_node: reused_subtree.refresh_node_id(deferred_draw.parent_node),
                     element_id_stack: deferred_draw.element_id_stack.clone(),
                     text_style_stack: deferred_draw.text_style_stack.clone(),
@@ -4449,6 +4598,17 @@ impl Window {
         })
     }
 
+    /// Hides the cursor for the upcoming frame at the platform level.
+    ///
+    /// Unlike a [`CursorStyle`], hiding has no shape of its own: a surface that
+    /// draws the pointer itself (remote desktop) uses this so the native arrow
+    /// does not trail the painted one. Like [`Self::set_window_cursor_style`],
+    /// it only applies during the paint phase and is recomputed every frame.
+    pub fn set_window_cursor_hidden(&mut self, hidden: bool) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.cursor_hidden = hidden;
+    }
+
     /// Sets a tooltip to be rendered for the upcoming frame. This method should only be called
     /// during the paint phase of element drawing.
     pub fn set_tooltip(&mut self, tooltip: AnyTooltip) -> TooltipId {
@@ -4540,8 +4700,10 @@ impl Window {
     pub fn transact<T, U>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, U>) -> Result<T, U> {
         self.invalidator.debug_assert_prepaint();
         let index = self.prepaint_index();
+        let a11y_checkpoint = self.a11y.prepaint_checkpoint();
         let result = f(self);
         if result.is_err() {
+            self.a11y.rollback_prepaint(a11y_checkpoint);
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
             self.next_frame
                 .tooltip_requests
@@ -4817,6 +4979,9 @@ impl Window {
         let parent_node = self.next_frame.dispatch_tree.active_node_id().unwrap();
         self.next_frame.deferred_draws.push(DeferredDraw {
             current_view: self.current_view(),
+            native_overlay_input: self
+                .native_overlay_input
+                .unwrap_or(NativeOverlayInput::Region),
             parent_node,
             element_id_stack: self.element_id_stack.clone(),
             text_style_stack: self.text_style_stack.clone(),
@@ -5600,11 +5765,25 @@ impl Window {
         let content_mask = crate::fast::layers::input::hitbox_mask(self);
         let id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
+        // Regional layers use viewport-sized shells for positioning only.
+        // Only an explicit Modal scope owns input over the whole viewport.
+        let bounds = if self.native_child_surface_mode
+            && self.native_overlay_input == Some(NativeOverlayInput::Region)
+            && bounds.origin.x <= Pixels::ZERO
+            && bounds.origin.y <= Pixels::ZERO
+            && bounds.size.width >= self.viewport_size.width
+            && bounds.size.height >= self.viewport_size.height
+        {
+            Bounds::default()
+        } else {
+            bounds
+        };
         let hitbox = Hitbox {
             id,
             bounds,
             content_mask,
             behavior,
+            native_overlay_input: self.native_overlay_input,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
         crate::fast::composition::record_input(self, id);
@@ -5749,6 +5928,10 @@ impl Window {
         }
     }
 
+    /// Notifies native text services that the focused component's content changed.
+    ///
+    /// Text components should call this after application-driven content changes,
+    /// in addition to notifying GPUI to redraw.
     /// Register a mouse event listener on the window for the next frame. The type of event
     /// is determined by the first parameter of the given listener. When the next frame is rendered
     /// the listener will be cleared.
@@ -5760,8 +5943,14 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
+        let overlay_listener = self.native_overlay_input.is_some();
         self.next_frame.mouse_listeners.push(Some(Box::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
+                // A native child receives its original input exactly once. Only
+                // overlay capture listeners observe it to dismiss outside menus.
+                if window.native_child_dispatch && !overlay_listener {
+                    return;
+                }
                 if let Some(event) = event.downcast_ref() {
                     listener(event, phase, window, cx)
                 }
@@ -5863,11 +6052,22 @@ impl Window {
     fn reset_cursor_style(&self, cx: &mut App) {
         // Set the cursor only if we're the active window.
         if self.is_window_hovered() {
+            if self.rendered_frame.cursor_hidden {
+                cx.platform.set_cursor_hidden();
+                return;
+            }
             // A drag can start before the next paint records its cursor in the frame.
             let style = cx
                 .active_drag_cursor_style()
                 .or_else(|| self.rendered_frame.cursor_style(self))
                 .unwrap_or(CursorStyle::Arrow);
+            // A hidden style is not a cursor any platform can draw; it maps onto
+            // the platform's "no native pointer" state, which every backend
+            // already implements for `Frame::cursor_hidden`.
+            if style == CursorStyle::Hidden {
+                cx.platform.set_cursor_hidden();
+                return;
+            }
             cx.platform.set_cursor_style(style);
         }
     }
@@ -5964,6 +6164,17 @@ impl Window {
             PlatformInput::MouseExited(mouse_exited) => {
                 self.modifiers = mouse_exited.modifiers;
                 PlatformInput::MouseExited(mouse_exited)
+            }
+            // The platform lost the gesture (capture change, modal cancel). Drop
+            // every pointer-held state so the next press starts clean.
+            PlatformInput::PointerCancelled(cancelled) => {
+                if cx.stop_active_drag(self) {
+                    cx.refresh_windows();
+                }
+                self.captured_hitbox = None;
+                self.long_press_capture = None;
+                self.refresh();
+                PlatformInput::PointerCancelled(cancelled)
             }
             PlatformInput::ModifiersChanged(modifiers_changed) => {
                 self.modifiers = modifiers_changed.modifiers;
@@ -6099,6 +6310,16 @@ impl Window {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
         }
+    }
+
+    /// Whether this window supports writing file promises after a native drop.
+    pub fn supports_file_promise_drag(&self) -> bool {
+        self.platform_window.supports_file_promise_drag()
+    }
+
+    /// Whether this window supports deferred native file content.
+    pub fn supports_virtual_file_drag(&self) -> bool {
+        self.platform_window.supports_virtual_file_drag()
     }
 
     fn promote_external_drag_to_platform(&mut self, event: &PlatformInput, cx: &mut App) {
@@ -6275,6 +6496,23 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
+        if self.native_child_surface_mode
+            && let Some(event) = event.downcast_ref::<MouseDownEvent>()
+        {
+            let inside = self.rendered_frame.hitboxes.iter().any(|hitbox| {
+                matches!(
+                    hitbox.native_overlay_input,
+                    Some(NativeOverlayInput::Region | NativeOverlayInput::Modal)
+                ) && hitbox
+                    .bounds
+                    .intersect(&hitbox.content_mask.bounds)
+                    .contains(&event.position)
+            });
+            if !inside && let Some(mut callback) = self.native_overlay_outside_down.take() {
+                callback(event, self, cx);
+                self.native_overlay_outside_down = Some(callback);
+            }
+        }
         self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -6298,7 +6536,7 @@ impl Window {
         }
 
         // Bubble phase, where most normal handlers do their work.
-        if crate::fast::composition::bubble_mouse(self, event, cx) {
+        if !self.native_child_dispatch && crate::fast::composition::bubble_mouse(self, event, cx) {
             for listener in mouse_listeners.iter_mut().rev() {
                 let listener = listener.as_mut().unwrap();
                 listener(event, DispatchPhase::Bubble, self, cx);

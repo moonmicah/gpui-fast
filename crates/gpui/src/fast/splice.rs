@@ -961,6 +961,7 @@ impl Window {
         {
             self.next_frame.deferred_draws.push(DeferredDraw {
                 current_view: deferred_draw.current_view,
+                native_overlay_input: deferred_draw.native_overlay_input,
                 parent_node: dispatch.refresh(deferred_draw.parent_node),
                 element_id_stack: deferred_draw.element_id_stack.clone(),
                 text_style_stack: deferred_draw.text_style_stack.clone(),
