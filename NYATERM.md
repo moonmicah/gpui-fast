@@ -71,6 +71,20 @@ the cursor exception, with the numbers from #137 (`added=48 removed=30`).
 rather than keeping a duplicate: `git rebase --onto <upstream merge> <last
 backport commit> nyaterm`, then re-run Verification.
 
+## 2026-11-13 rebase onto upstream #139
+
+Upstream main moved from `bbf6dea` to `d1d6286` (`macos: Avoid deadlocking`
+`on unknown menu items (#139)`), which adds `fast/menu.rs` +
+`fast/menu_tests.rs` and replaces three method bodies in
+`crates/gpui_macos/src/platform.rs`. The ten NyaTerm commits were rebased
+onto it. Two files conflicted twice (`fast/mod.rs` module declarations and
+`script/upstream-allowlist`); both now carry the upstream `menu` entries
+alongside `cursor` / `frame_demand`, and the allowlist keeps the new
+`platform.rs removed=55` line from #139.
+
+`check-upstream` still reports 36 violations, unchanged from the previous
+tip, so no new upstream-hook breakage was introduced.
+
 ## Verification
 
 - `cargo check -p gpui-fast -p gpui-fast-macos` (macOS host) passes.
