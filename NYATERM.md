@@ -16,13 +16,13 @@ nyaterm
 ├── nyaterm: carry the local engine patches onto the release-form branch
 ├── docs:    document the nyaterm branch
 ├── macos:   damage the native view when requesting an idle frame   (#137)
-├── macos:   preserve nonblocking frame-source attachment checks    (#137)
-└── fast:    wait longer each time a layer's content is still ineligible (#138)
+└── macos:   preserve nonblocking frame-source attachment checks    (#137)
 ```
 
-The last three commits backport upstream pull requests that were open when
-they were taken; see the section below for how to drop them once upstream
-merges them.
+The last two commits backport upstream #137, which was still open when it
+was taken; see the section below for how to drop it once upstream merges it.
+#138 was carried the same way but upstream shipped it in v0.1.15, so its
+commit was dropped during the 2026-11-13 rebase.
 
 ## 2026-11-12 move NyaTerm onto a fork branch
 
@@ -67,7 +67,9 @@ needed hand resolution: `crates/gpui_macos/src/fast/mod.rs` lists both
 `script/upstream-allowlist` now carries the frame-demand hooks alongside
 the cursor exception, with the numbers from #137 (`added=48 removed=30`).
 
-**Once upstream merges either PR**, drop the corresponding commits here
+**#138 landed upstream as `e1ed545` (tag `v0.1.15`)** with a patch-id
+identical to the cherry-picked commit, so the 2026-11-13 rebase dropped it
+automatically. **Once upstream merges #137**, drop its two commits here
 rather than keeping a duplicate: `git rebase --onto <upstream merge> <last
 backport commit> nyaterm`, then re-run Verification.
 
@@ -84,6 +86,22 @@ alongside `cursor` / `frame_demand`, and the allowlist keeps the new
 
 `check-upstream` still reports 36 violations, unchanged from the previous
 tip, so no new upstream-hook breakage was introduced.
+
+## 2026-11-13 rebase onto upstream v0.1.15 + #140
+
+Upstream main moved from `d1d6286` to `80be501` with two commits:
+
+- `e1ed545` (tag `v0.1.15`) is #138, the scroll-layer backoff previously
+  backported here. Its patch-id matches the local cherry-pick exactly, so
+  `git rebase --onto origin/main d1d6286 nyaterm` dropped the duplicate.
+- `80be501` is #140, a Windows-only change (`fast/backdrop.rs` plus two
+  edits in `gpui_windows`) making Blurred windows readable with the Windows
+  11 acrylic backdrop. It touches no file in the local patch groups.
+
+All ten remaining NyaTerm commits replayed without a conflict: #139 was
+already in the new base, and the `fast/mod.rs` / `upstream-allowlist`
+resolutions from the previous rebase applied cleanly. `fast/mod.rs` now
+lists `composition`, `cursor`, `frame_demand` and `menu` together.
 
 ## Verification
 
