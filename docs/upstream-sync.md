@@ -89,6 +89,16 @@ only hold the hooks that call into it.
    The addition is one public function returning a clone of the context in
    the slot, read from a thread-local the one hook in `WgpuRenderer::new`
    (`note_gpu_context`) fills; the slot itself stays private.
+   A fourth exception is `CursorStyle::Hidden` (in `crates/gpui/src/platform.rs`,
+   longbridge/gpui-fast#134): an application that paints the pointer itself — a
+   remote desktop client draws the remote machine's cursor inside its frames —
+   needs the native pointer gone while that is on screen, and upstream offers
+   nothing of the kind: `hide_cursor_until_mouse_moves` re-shows on any mouse
+   motion, which is exactly what a remote desktop session has constantly. The
+   addition is one enum variant; applications reach it through the existing
+   element style API (`cursor_style(CursorStyle::Hidden)`), and everything the
+   platforms do to answer it lives in their `fast` cursor modules, nothing in
+   `gpui` itself.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).

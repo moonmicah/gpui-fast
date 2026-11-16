@@ -2695,6 +2695,7 @@ pub(crate) unsafe fn native_cursor(style: CursorStyle) -> *mut AnyObject {
     // SAFETY: Each selector is an `NSCursor` class method returning a cursor.
     unsafe {
         match style {
+            CursorStyle::Hidden => crate::fast::cursor::hidden_cursor(),
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
             CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
             CursorStyle::Crosshair => msg_send![class!(NSCursor), crosshairCursor],

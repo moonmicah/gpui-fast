@@ -3071,6 +3071,13 @@ impl From<&str> for PromptButton {
     Copy, Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, EnumIter,
 )]
 pub enum CursorStyle {
+    /// Hide the native cursor while the pointer is over the element.
+    /// Corresponds to the CSS cursor value `none`.
+    ///
+    /// The platform crates' `fast` cursor modules answer this style inside
+    /// `set_cursor_style`; a platform without one draws its default shape.
+    Hidden,
+
     /// The default cursor
     #[default]
     Arrow,
