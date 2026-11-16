@@ -388,7 +388,89 @@ pub(crate) fn remove(texture: DynamicTexture) {
     }
 }
 
+/// Planar 8-bit I420 video texture.
+///
+/// The retained engine uploads BGRA through [`DynamicTexture`] and has no
+/// planar-video shader path, so this handle exists only to keep consumers
+/// written against the newer upstream API compiling.
+/// [`Window::supports_video_textures`] answers `false`, which makes such a
+/// consumer ask its frame source for BGRA instead; the calls below then never
+/// run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoTexture {
+    id: DynamicTextureId,
+}
+
+impl VideoTexture {
+    /// Identifies the texture, matching the upstream accessor.
+    pub fn id(&self) -> DynamicTextureId {
+        self.id
+    }
+}
+
+/// Non-constant-luminance YUV conversion matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VideoColorMatrix {
+    /// ITU-R BT.601 (also the default for unspecified sources).
+    Bt601 = 0,
+    /// ITU-R BT.709.
+    Bt709 = 1,
+    /// ITU-R BT.2020 non-constant luminance.
+    Bt2020 = 2,
+}
+
 impl Window {
+    /// Whether this window can sample planar video textures.
+    ///
+    /// Always `false` here: the retained engine paints frames through
+    /// [`Window::create_dynamic_texture`] and has no planar-video shader.
+    pub fn supports_video_textures(&self) -> bool {
+        false
+    }
+
+    /// Creates a reusable I420 texture.
+    ///
+    /// Reports an error as soon as it is called; a consumer reaches it only
+    /// after ignoring [`Window::supports_video_textures`].
+    pub fn create_video_texture(
+        &mut self,
+        size: crate::Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<VideoTexture> {
+        let _ = (size, bytes);
+        Err(anyhow::anyhow!(
+            "planar video textures are not implemented by the retained engine"
+        ))
+    }
+
+    /// Uploads a tightly packed I420 frame into a video texture.
+    pub fn update_video_texture(&mut self, texture: VideoTexture, bytes: &[u8]) -> Result<()> {
+        let _ = (texture, bytes);
+        Err(anyhow::anyhow!(
+            "planar video textures are not implemented by the retained engine"
+        ))
+    }
+
+    /// Paints a video texture with an explicit source matrix and range.
+    pub fn paint_video_texture(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: VideoTexture,
+        matrix: VideoColorMatrix,
+        full_range: bool,
+    ) -> Result<()> {
+        let _ = (bounds, texture, matrix, full_range);
+        Err(anyhow::anyhow!(
+            "planar video textures are not implemented by the retained engine"
+        ))
+    }
+
+    /// Releases this window's video allocation, which never exists here.
+    pub fn remove_video_texture(&mut self, texture: VideoTexture) {
+        let _ = texture;
+    }
+
     /// Allocates a mutable BGRA8 texture for content that changes every
     /// frame, such as a stream of video or remote desktop frames.
     ///

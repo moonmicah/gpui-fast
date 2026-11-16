@@ -46,6 +46,7 @@ three-way merged with current upstream sources:
 | cursor hidden | `CursorStyle::Hidden` answered by a transparent native cursor (macOS, Windows) so remote-desktop frames can hide the local pointer |
 | pointer cancellation | `PlatformInput::PointerCancelled`, delivered when a window loses the pointer capture mid-drag |
 | accessibility checkpoint | accessibility state rolled back when a prepaint retry restarts a frame, plus the `has_internal_drag` and `activate_accessibility` helpers the app and its tests use |
+| planar video shim | `VideoTexture` / `VideoColorMatrix` and the five `Window` video methods, kept only so a consumer written against the newer upstream API compiles; `supports_video_textures` answers `false`, so it paints through `DynamicTexture` instead (no planar sampler in this engine) |
 
 The Windows dynamic-texture backend is **not** carried here: upstream
 #131 already ships it.
@@ -140,6 +141,29 @@ above `on_move_tab_to_new_window`, away from the hooks the `nyaterm:` commit
 adds, and its allowlist entry applied as-is.
 
 `check-upstream` still reports 36 violations, unchanged.
+
+## 2026-11-16 planar video shim
+
+NyaTerm's `main` now paints Android screen frames through the newer upstream
+planar-video API (`gpui::VideoTexture`, `VideoColorMatrix`, and
+`Window::{supports,create,update,paint,remove}_video_texture`), which the
+retained 0.1.14 engine does not have. Rather than diverge the application
+code, `fast/dynamic_textures.rs` ships those names as a compiling stand-in:
+
+- `supports_video_textures` answers `false`, so the caller keeps requesting
+  BGRA and paints through `DynamicTexture`, the path the engine does support.
+- `create` / `update` / `paint` return an error if reached anyway; `remove`
+  does nothing.
+
+Android screen frames therefore lose only the I420 planarity saving, not the
+feature. A real implementation needs a planar sampler in the Metal, DirectX
+and wgpu atlases, which this branch does not carry.
+
+The same rebase needed explicit `impl IntoElement` blocks restored for
+`SelectionRetention`, `NyaTerminalElement`, `TabMotionElement` and
+`TabStripViewportElement`: upstream zed now declares `Element: Sized` plus
+`impl<T: Element> IntoElement for T`, while the retained engine still declares
+`Element: IntoElement` and has no blanket impl, so every element spells it out.
 
 ## Verification
 

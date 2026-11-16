@@ -133,7 +133,8 @@ pub use fast::composition::{
     WindowComposition, WindowCompositionSurface,
 };
 pub use fast::dynamic_textures::{
-    DynamicTexture, DynamicTextureId, DynamicTexturePlatform, set_dynamic_texture_platform,
+    DynamicTexture, DynamicTextureId, DynamicTexturePlatform, VideoColorMatrix, VideoTexture,
+    set_dynamic_texture_platform,
 };
 pub use fast::layers::scene::{
     LAYER_TILE_TEXTURE_BASE, LayerContent, LayerFrame, LayerKey, SceneLayers, TileCoord,
