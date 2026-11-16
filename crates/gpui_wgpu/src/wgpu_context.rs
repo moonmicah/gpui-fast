@@ -1,3 +1,4 @@
+// Modified for gpui-fast releases: adapted to wgpu 30.0.1.
 #[cfg(not(target_family = "wasm"))]
 use crate::{WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]
@@ -464,7 +465,6 @@ impl WgpuContext {
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                default_queue: wgpu::QueueDescriptor::default(),
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;

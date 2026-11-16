@@ -28,3 +28,5 @@ crates/gpui_linux/src/linux/x11/window.rs hunk=19 # X11Window's four window comp
 
 crates/gpui_linux/src/linux/x11/client.rs added=48 # existing overlay input hook plus native pointer recipient, coordinate and focus-id hooks; a FocusIn/FocusOut arm ignoring focus moves into child windows through fast::x11_focus, which rustfmt spreads over two lines; all routing logic stays in fast::composition::x11
 crates/gpui_apple/src/text_system.rs removed=30 # load_family no longer skips a font without an 'm' glyph (the system's Arial Hebrew, Geeza Pro and Apple Color Emoji among them): upstream's guard block, which protected callers of em metrics in Zed's editor, is removed whole
+
+crates/gpui_wgpu/src/wgpu_renderer.rs any # release-form adaptation, not an engine change: the source is rewritten for registry wgpu 30.0.1 (has_srgb_suffix -> is_srgb) and carries the "Modified for gpui-fast releases" header, mirroring what script/prepare-release.ts ships to crates.io
