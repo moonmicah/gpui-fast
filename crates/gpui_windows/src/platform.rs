@@ -1019,6 +1019,16 @@ impl Platform for WindowsPlatform {
         }
     }
 
+    /// Leaves no native pointer on screen. `current_cursor` doubles as the
+    /// "shape to restore" slot, so hiding clears it and the next
+    /// `set_cursor_style` sees the change and posts a restore.
+    fn set_cursor_hidden(&self) {
+        if self.inner.state.current_cursor.get().is_some() {
+            self.inner.state.current_cursor.set(None);
+            self.post_message(WM_GPUI_CURSOR_STYLE_CHANGED, WPARAM(0), LPARAM(0));
+        }
+    }
+
     fn hide_cursor_until_mouse_moves(&self) {
         if !self
             .inner

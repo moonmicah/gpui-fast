@@ -116,9 +116,11 @@ impl LayerFrame {
         let mut scene = Scene::default();
         for operation in self.content.operations_over(bounds) {
             match operation {
-                PaintOperation::Primitive(primitive) => {
+                PaintOperation::Primitive(primitive, on_overlay) => {
                     if visible_bounds(primitive).intersects(&bounds) {
+                        let previous = scene.set_native_overlay(*on_overlay);
                         scene.insert_primitive(translate_primitive(primitive, delta));
+                        scene.set_native_overlay(previous);
                     }
                 }
                 PaintOperation::StartLayer(layer_bounds) => {

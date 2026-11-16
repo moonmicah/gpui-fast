@@ -623,7 +623,7 @@ pub(crate) fn replay_layers(scene: &mut Scene, range: Range<usize>, previous: &S
         return;
     }
     for operation in &previous.paint_operations[range] {
-        let PaintOperation::Primitive(Primitive::PolychromeSprite(sprite)) = operation else {
+        let PaintOperation::Primitive(Primitive::PolychromeSprite(sprite), _) = operation else {
             continue;
         };
         let Some((key, _)) = decode_layer_tile(sprite.tile.texture_id, sprite.tile.tile_id) else {
@@ -651,10 +651,12 @@ pub(crate) fn draw_into_frame<'a>(
     let scene = &mut window.next_frame.scene;
     for operation in operations {
         match operation {
-            PaintOperation::Primitive(primitive) => {
+            PaintOperation::Primitive(primitive, on_overlay) => {
                 let mut primitive = translate_primitive(primitive, delta);
                 clip_primitive(&mut primitive, viewports);
+                let previous = scene.set_native_overlay(*on_overlay);
                 scene.insert_primitive(primitive);
+                scene.set_native_overlay(previous);
             }
             PaintOperation::StartLayer(bounds) => {
                 let bounds = Bounds {
@@ -754,13 +756,13 @@ fn repaint(
     let has_paths = content
         .paint_operations
         .iter()
-        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
+        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_), _)));
     let mut visible = painting.viewport.scale(scale_factor);
     visible.origin += to_content;
     let mut rendered_work = 0;
     let mut visible_work = 0;
     for operation in &content.paint_operations {
-        if let PaintOperation::Primitive(primitive) = operation {
+        if let PaintOperation::Primitive(primitive, _) = operation {
             rendered_work += 1;
             visible_work += usize::from(visible_bounds(primitive).intersects(&visible));
         }
@@ -913,8 +915,10 @@ fn translated_scene(scene: &Scene, delta: Point<ScaledPixels>) -> Scene {
     let mut translated = Scene::default();
     for operation in &scene.paint_operations {
         match operation {
-            PaintOperation::Primitive(primitive) => {
-                translated.insert_primitive(translate_primitive(primitive, delta))
+            PaintOperation::Primitive(primitive, on_overlay) => {
+                let previous = translated.set_native_overlay(*on_overlay);
+                translated.insert_primitive(translate_primitive(primitive, delta));
+                translated.set_native_overlay(previous);
             }
             PaintOperation::StartLayer(bounds) => translated.push_layer(Bounds {
                 origin: bounds.origin + delta,

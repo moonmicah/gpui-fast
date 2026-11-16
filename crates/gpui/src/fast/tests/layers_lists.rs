@@ -112,7 +112,7 @@ fn expanded_quads(scene: &Scene) -> Vec<String> {
         let viewport = sprite.content_mask.bounds;
         let mut content = Scene::default();
         for operation in frame.content.operations() {
-            if let crate::scene::PaintOperation::Primitive(primitive) = operation {
+            if let crate::scene::PaintOperation::Primitive(primitive, _) = operation {
                 content.insert_primitive(primitive.clone());
             }
         }

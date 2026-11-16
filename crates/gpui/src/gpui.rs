@@ -37,6 +37,7 @@ mod element;
 mod elements;
 mod executor;
 mod fast;
+mod file_promise;
 mod geometry;
 mod gestures;
 mod global;
@@ -61,6 +62,7 @@ mod taffy;
 mod text_system;
 mod util;
 mod view;
+mod virtual_file;
 mod window;
 
 #[cfg(feature = "profiler")]
@@ -124,6 +126,7 @@ pub use color::*;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
+pub use file_promise::*;
 pub use fast::composition::{
     ComposedScene, ComposedSceneLayer, CompositionSurfaceId, CompositionSurfaceKind,
     PlatformCompositionSurface, PlatformCompositionSurfaceContent, PlatformSurfaceAttachment,
@@ -165,6 +168,7 @@ pub use taffy::{AvailableSpace, LayoutId};
 pub use text_system::*;
 pub use util::{FutureExt, Timeout};
 pub use view::*;
+pub use virtual_file::*;
 pub use window::*;
 
 #[cfg(not(target_family = "wasm"))]

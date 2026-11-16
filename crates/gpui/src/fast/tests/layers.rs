@@ -183,11 +183,13 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
                     ..quad(sp(0., y, 700., 200.))
                 }
                 .into(),
+                false,
             )];
             if row % 2 == 0 {
                 operations.push(PaintOperation::StartLayer(sp(0., y, 700., 200.)));
                 operations.push(PaintOperation::Primitive(
                     quad(sp(480., y + 50., 60., 60.)).into(),
+                    false,
                 ));
                 operations.push(PaintOperation::Primitive(
                     Quad {
@@ -195,6 +197,7 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
                         ..quad(sp(500., y + 70., 60., 60.))
                     }
                     .into(),
+                    false,
                 ));
                 operations.push(PaintOperation::EndLayer);
             }
@@ -213,6 +216,7 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
                         pad: 0,
                     }
                     .into(),
+                    false,
                 ));
             }
             operations
@@ -222,7 +226,11 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
     let mut whole = Scene::default();
     for operation in rows.iter().flatten() {
         match operation {
-            PaintOperation::Primitive(primitive) => whole.insert_primitive(primitive.clone()),
+            PaintOperation::Primitive(primitive, on_overlay) => {
+                let previous = whole.set_native_overlay(*on_overlay);
+                whole.insert_primitive(primitive.clone());
+                whole.set_native_overlay(previous);
+            }
             PaintOperation::StartLayer(bounds) => whole.push_layer(*bounds),
             PaintOperation::EndLayer => whole.pop_layer(),
             PaintOperation::FastRoundedClip(clip) => {
@@ -237,8 +245,8 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
         scene.paint_operations = operations
             .iter()
             .map(|operation| match operation {
-                PaintOperation::Primitive(primitive) => {
-                    PaintOperation::Primitive(primitive.clone())
+                PaintOperation::Primitive(primitive, on_overlay) => {
+                    PaintOperation::Primitive(primitive.clone(), *on_overlay)
                 }
                 PaintOperation::StartLayer(bounds) => PaintOperation::StartLayer(*bounds),
                 PaintOperation::EndLayer => PaintOperation::EndLayer,

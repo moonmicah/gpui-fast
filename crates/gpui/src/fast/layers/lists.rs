@@ -1626,10 +1626,10 @@ fn drawn_alike(a: &Row, b: &Row) -> bool {
             .paint_operations
             .iter()
             .map(|operation| match operation {
-                PaintOperation::Primitive(primitive) => {
+                PaintOperation::Primitive(primitive, on_overlay) => {
                     let mut primitive = primitive.clone();
                     move_primitive(&mut primitive, to_row);
-                    PaintOperation::Primitive(primitive)
+                    PaintOperation::Primitive(primitive, *on_overlay)
                 }
                 PaintOperation::StartLayer(bounds) => PaintOperation::StartLayer(Bounds {
                     origin: bounds.origin + to_row,
@@ -2843,7 +2843,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
             .collect();
         for operation in &mut row_operations {
             match operation {
-                PaintOperation::Primitive(primitive) => move_primitive(primitive, to_content),
+                PaintOperation::Primitive(primitive, _) => move_primitive(primitive, to_content),
                 PaintOperation::StartLayer(bounds) => bounds.origin = bounds.origin + to_content,
                 PaintOperation::EndLayer => {}
                 PaintOperation::FastRoundedClip(clip) => *clip = clip.translated(to_content),

@@ -163,7 +163,51 @@ pub(crate) struct A11y {
     pub(crate) view_type_names: FxHashMap<EntityId, &'static str>,
 }
 
+/// What a [`A11y`] looked like before a prepaint that [`crate::Window::transact`]
+/// may have to retry.
+pub(crate) struct A11yPrepaintCheckpoint {
+    nodes: Option<A11yNodeCheckpoint>,
+    focus_ids: FxHashMap<NodeId, FocusId>,
+    node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
+    action_listener_lengths: FxHashMap<NodeId, usize>,
+    last_focus_without_node: Option<FocusId>,
+}
+
 impl A11y {
+    /// Where accessibility stands now, for [`Self::rollback_prepaint`].
+    pub(crate) fn prepaint_checkpoint(&self) -> A11yPrepaintCheckpoint {
+        A11yPrepaintCheckpoint {
+            nodes: self.is_active().then(|| self.nodes.checkpoint()),
+            focus_ids: self.focus_ids.clone(),
+            node_bounds: self.node_bounds.clone(),
+            action_listener_lengths: self
+                .action_listeners
+                .iter()
+                .map(|(id, listeners)| (*id, listeners.len()))
+                .collect(),
+            last_focus_without_node: self.last_focus_without_node,
+        }
+    }
+
+    /// Drops everything the abandoned prepaint registered, so the retry draws
+    /// the same tree into a clean builder instead of colliding with it.
+    pub(crate) fn rollback_prepaint(&mut self, checkpoint: A11yPrepaintCheckpoint) {
+        if let Some(nodes) = checkpoint.nodes {
+            self.nodes.rollback(nodes);
+        }
+        self.focus_ids = checkpoint.focus_ids;
+        self.node_bounds = checkpoint.node_bounds;
+        self.action_listeners.retain(|id, listeners| {
+            if let Some(length) = checkpoint.action_listener_lengths.get(id) {
+                listeners.truncate(*length);
+                true
+            } else {
+                false
+            }
+        });
+        self.last_focus_without_node = checkpoint.last_focus_without_node;
+    }
+
     pub(crate) fn new(
         active_flag: Arc<AtomicBool>,
         force_disabled: bool,
@@ -392,6 +436,17 @@ pub(crate) struct A11yNodeBuilder {
     pub(crate) fast: crate::fast::a11y::A11yLog,
 }
 
+/// Where [`A11yNodeBuilder`] stood before a prepaint that [`crate::Window::transact`]
+/// may have to retry, so the nodes it added can be forgotten first.
+pub(crate) struct A11yNodeCheckpoint {
+    ids_stack: SmallVec<[NodeId; 16]>,
+    nodes_stack: SmallVec<[accesskit::Node; 16]>,
+    all_nodes_len: usize,
+    focus: Option<NodeId>,
+    active_descendant: Option<NodeId>,
+    fast_ops_len: usize,
+}
+
 impl A11yNodeBuilder {
     fn new() -> Self {
         Self {
@@ -477,6 +532,42 @@ impl A11yNodeBuilder {
             crate::fast::a11y::A11yLog::pop(&mut self.fast, self.all_nodes.len());
             self.all_nodes.push((id, node));
         }
+    }
+
+    /// Where the builder stands now, for [`Self::rollback`].
+    fn checkpoint(&self) -> A11yNodeCheckpoint {
+        // Completed nodes are immutable during prepaint. Only open ancestors
+        // need copies: adding a child or writing synthetic metadata mutates them.
+        A11yNodeCheckpoint {
+            ids_stack: self.ids_stack.clone(),
+            nodes_stack: self.nodes_stack.clone(),
+            all_nodes_len: self.all_nodes.len(),
+            focus: self.focus,
+            active_descendant: self.active_descendant,
+            fast_ops_len: crate::fast::a11y::A11yLog::ops_len(&self.fast),
+        }
+    }
+
+    /// Forgets every node pushed since `checkpoint`, so the retried prepaint
+    /// pushes them again rather than colliding with the abandoned attempt.
+    fn rollback(&mut self, checkpoint: A11yNodeCheckpoint) {
+        // Every new node is either complete or still on the stack. Forget its
+        // identity before the retry so that real duplicate IDs remain errors.
+        for (id, _) in self.all_nodes.drain(checkpoint.all_nodes_len..) {
+            self.seen_ids.remove(&id);
+            #[cfg(debug_assertions)]
+            self.node_info.remove(&id);
+        }
+        for id in &self.ids_stack[checkpoint.ids_stack.len()..] {
+            self.seen_ids.remove(id);
+            #[cfg(debug_assertions)]
+            self.node_info.remove(id);
+        }
+        crate::fast::a11y::A11yLog::rollback_to(&mut self.fast, checkpoint.fast_ops_len);
+        self.ids_stack = checkpoint.ids_stack;
+        self.nodes_stack = checkpoint.nodes_stack;
+        self.focus = checkpoint.focus;
+        self.active_descendant = checkpoint.active_descendant;
     }
 
     /// Push the root node to start a new frame.

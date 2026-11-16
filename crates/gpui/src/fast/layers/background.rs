@@ -38,7 +38,7 @@ pub(crate) fn bake_operations(
     let mut top: Option<(DrawOrder, &Primitive)> = None;
     let mut sharing_top = 0;
     for operation in operations {
-        let PaintOperation::Primitive(primitive) = operation else {
+        let PaintOperation::Primitive(primitive, _) = operation else {
             continue;
         };
         let visible = visible_bounds(primitive);

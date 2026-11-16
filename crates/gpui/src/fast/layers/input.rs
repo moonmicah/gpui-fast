@@ -108,6 +108,7 @@ impl LayerInput {
                 .intersect(&viewport),
             },
             behavior: hitbox.behavior,
+            native_overlay_input: hitbox.native_overlay_input,
         })
     }
 }

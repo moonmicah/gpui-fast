@@ -93,7 +93,7 @@ pub(crate) fn compile(scene: &mut Scene) {
                     },
                 });
             }
-            PaintOperation::Primitive(primitive) => stack
+            PaintOperation::Primitive(primitive, _) => stack
                 .last_mut()
                 .unwrap()
                 .insert_primitive(primitive.clone()),

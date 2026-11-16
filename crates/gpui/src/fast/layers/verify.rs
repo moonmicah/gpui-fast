@@ -82,7 +82,7 @@ fn expand_layer(
     let mut scratch = Scene::default();
     for operation in layer.content.operations() {
         match operation {
-            PaintOperation::Primitive(primitive) => {
+            PaintOperation::Primitive(primitive, _) => {
                 let mut moved =
                     crate::fast::layers::scene::translate_primitive(primitive, translation);
                 clip_to(&mut moved, viewport);

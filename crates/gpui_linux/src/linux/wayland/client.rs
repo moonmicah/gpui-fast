@@ -691,7 +691,13 @@ impl WaylandClientStatePtr {
             return false;
         };
 
-        let ExternalDragPayload::Files(paths) = payload;
+        // The deferred virtual and promised payloads need a destination that
+        // can pull file contents, which this backend does not implement; only
+        // real on-disk paths can be offered as a URI list here.
+        let paths = match payload {
+            ExternalDragPayload::Files(paths) => paths,
+            _ => return false,
+        };
         let uri_list = file_uri_list(paths);
         if uri_list.is_empty() {
             return false;

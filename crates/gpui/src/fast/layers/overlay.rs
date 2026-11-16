@@ -69,7 +69,7 @@ pub(crate) fn split(
 ) -> Option<(Vec<PaintOperation>, Vec<Primitive>)> {
     let painted_path = operations
         .iter()
-        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
+        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_), _)));
     if !painted_path {
         return None;
     }
@@ -87,7 +87,7 @@ pub(crate) fn split(
         .iter()
         .enumerate()
         .filter_map(|(ix, operation)| match operation {
-            PaintOperation::Primitive(primitive) => {
+            PaintOperation::Primitive(primitive, _) => {
                 Some(((draw_order(primitive), rank(primitive), ix), primitive))
             }
             _ => None,
@@ -115,7 +115,9 @@ pub(crate) fn split(
         .zip(&in_overlay)
         .filter(|(_, in_overlay)| !**in_overlay)
         .map(|(operation, _)| match operation {
-            PaintOperation::Primitive(primitive) => PaintOperation::Primitive(primitive.clone()),
+            PaintOperation::Primitive(primitive, on_overlay) => {
+                PaintOperation::Primitive(primitive.clone(), *on_overlay)
+            }
             PaintOperation::StartLayer(bounds) => PaintOperation::StartLayer(*bounds),
             PaintOperation::EndLayer => PaintOperation::EndLayer,
             PaintOperation::FastRoundedClip(clip) => PaintOperation::FastRoundedClip(*clip),
@@ -133,7 +135,11 @@ pub(crate) fn lift(content: Scene) -> (Scene, Rc<[Primitive]>) {
     let mut rest = Scene::default();
     for operation in tiles {
         match operation {
-            PaintOperation::Primitive(primitive) => rest.insert_primitive(primitive),
+            PaintOperation::Primitive(primitive, on_overlay) => {
+                let previous = rest.set_native_overlay(on_overlay);
+                rest.insert_primitive(primitive);
+                rest.set_native_overlay(previous);
+            }
             PaintOperation::StartLayer(bounds) => rest.push_layer(bounds),
             PaintOperation::EndLayer => rest.pop_layer(),
             PaintOperation::FastRoundedClip(clip) => {
