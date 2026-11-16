@@ -165,6 +165,37 @@ The same rebase needed explicit `impl IntoElement` blocks restored for
 `impl<T: Element> IntoElement for T`, while the retained engine still declares
 `Element: IntoElement` and has no blanket impl, so every element spells it out.
 
+## 2026-11-16 rebase onto the zed 78f5d74 sync (#148)
+
+Upstream main moved from `31a0d8f` to `454c29e`, dominated by
+`Sync with zed 78f5d74 (#148)`, the follow-up `Drop hand-written IntoElement
+impls now covered by upstream's blanket impl`, the GLES 3.0 wgpu path with
+color emoji fallbacks (#141), and the font-smoothing-off fix (#142).
+
+Two API consequences for NyaTerm:
+
+- The retained engine now has upstream's blanket
+  `impl<T: Element> IntoElement for T`, so the four explicit `impl
+  IntoElement` blocks NyaTerm restored last rebase are coherence errors
+  again and are deleted once more.
+- `reset_cursor_rects` was refactored into `native_cursor(style)`; the
+  `CursorStyle::Hidden => crate::fast::cursor::hidden_cursor()` arm moves
+  into that function's match.
+
+Rebase conflicts, all mechanical:
+
+- `Cargo.lock` / `crates/gpui_macos/Cargo.toml` (release-manifest commit):
+  upstream added one dependency, `serde_json`, to `gpui_macos`; the
+  registry-form manifest gains the same entry and the lock one line.
+- `crates/gpui_macos/src/window.rs` (cursor commit): see above.
+- `crates/gpui_windows/src/events.rs` (patch commit): upstream typed
+  `handle_move_msg` as `self: &Rc<Self>`; the pointer-cancel helpers keep
+  the upstream signature.
+
+The planar-video shim and the #137 backport replay unchanged; `check-upstream`
+still reports 36 violations. Stray `compat/gpui-pre/Cargo.toml*` cargo temp
+files that slipped into an earlier manifest commit are removed.
+
 ## Verification
 
 - `cargo check -p gpui-fast -p gpui-fast-macos` (macOS host) passes.
