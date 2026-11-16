@@ -124,6 +124,23 @@ test is taken.
 The NyaTerm commits replayed otherwise clean; `check-upstream` still
 reports 36 violations, unchanged.
 
+## 2026-11-16 rebase onto upstream #146
+
+Upstream main moved from `cd2e68f` to `31a0d8f` (`window: Defer window
+callbacks that arrive while the app is borrowed (#146)`), which fixes the
+`RefCell already borrowed` errors and the `on_display_changed` panic a
+re-entered Windows window procedure caused. It adds
+`crates/gpui/src/fast/misc/reentrant_window.rs`, registers it with one line
+in `crates/gpui/src/window.rs`, makes `Window::display_changed` `pub(crate)`
+for it, and raises that file's allowlist entry from `added=108` to
+`added=110`.
+
+The five NyaTerm commits replayed without a conflict: #146's hook sits just
+above `on_move_tab_to_new_window`, away from the hooks the `nyaterm:` commit
+adds, and its allowlist entry applied as-is.
+
+`check-upstream` still reports 36 violations, unchanged.
+
 ## Verification
 
 - `cargo check -p gpui-fast -p gpui-fast-macos` (macOS host) passes.
