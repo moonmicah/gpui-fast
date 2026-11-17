@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-fast-platform"
-version = "0.1.14"
+version = "0.1.16"
 authors = ["Longbridge"]
 build = false
 include = [
@@ -32,7 +32,7 @@ autotests = false
 autobenches = false
 description = "gpui_platform: GPUI with gpui-fast rendering and layout optimizations"
 homepage = "https://github.com/longbridge/gpui-fast"
-documentation = "https://docs.rs/gpui-fast-platform/0.1.14/gpui_platform/"
+documentation = "https://docs.rs/gpui-fast-platform/0.1.16/gpui_platform/"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
@@ -76,13 +76,13 @@ doctest = false
 version = "1.0.86"
 
 [dependencies.gpui]
-version = "^0.1.14"
+version = "^0.1.16"
 default-features = false
 package = "gpui-fast"
 path = "../gpui"
 
 [target.'cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))'.dependencies.gpui_linux]
-version = "^0.1.14"
+version = "^0.1.16"
 default-features = false
 package = "gpui-fast-linux"
 path = "../gpui_linux"
@@ -91,7 +91,7 @@ path = "../gpui_linux"
 version = "0.1.7"
 
 [target.'cfg(target_family = "wasm")'.dependencies.gpui_web]
-version = "^0.1.14"
+version = "^0.1.16"
 default-features = false
 package = "gpui-fast-web"
 path = "../gpui_web"
@@ -101,26 +101,26 @@ version = "=0.3.12"
 package = "gpui-pre-ios"
 
 [target.'cfg(target_os = "linux")'.dependencies.gpui_wgpu]
-version = "^0.1.14"
+version = "^0.1.16"
 optional = true
 package = "gpui-fast-wgpu"
 path = "../gpui_wgpu"
 
 [target.'cfg(target_os = "macos")'.dependencies.gpui_macos]
-version = "^0.1.14"
+version = "^0.1.16"
 default-features = false
 package = "gpui-fast-macos"
 path = "../gpui_macos"
 
 [target.'cfg(target_os = "windows")'.dependencies.gpui]
-version = "^0.1.14"
+version = "^0.1.16"
 features = ["windows-manifest"]
 default-features = false
 package = "gpui-fast"
 path = "../gpui"
 
 [target.'cfg(target_os = "windows")'.dependencies.gpui_windows]
-version = "^0.1.14"
+version = "^0.1.16"
 default-features = false
 package = "gpui-fast-windows"
 path = "../gpui_windows"

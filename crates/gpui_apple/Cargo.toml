@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-fast-apple"
-version = "0.1.14"
+version = "0.1.16"
 authors = ["Longbridge"]
 build = "build.rs"
 include = [
@@ -32,7 +32,7 @@ autotests = false
 autobenches = false
 description = "gpui_apple: GPUI with gpui-fast rendering and layout optimizations"
 homepage = "https://github.com/longbridge/gpui-fast"
-documentation = "https://docs.rs/gpui-fast-apple/0.1.14/gpui_apple/"
+documentation = "https://docs.rs/gpui-fast-apple/0.1.16/gpui_apple/"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
@@ -56,7 +56,7 @@ path = "src/gpui_apple.rs"
 doctest = false
 
 [dependencies.gpui]
-version = "^0.1.14"
+version = "^0.1.16"
 default-features = false
 package = "gpui-fast"
 path = "../gpui"
