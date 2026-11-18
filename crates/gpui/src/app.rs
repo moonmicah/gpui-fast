@@ -1975,6 +1975,22 @@ impl App {
     }
 
     /// Writes data to the platform clipboard.
+    /// Publish files for native paste; each paste obtains a fresh provider payload.
+    pub fn write_file_clipboard(
+        &self,
+        provider: std::sync::Arc<
+            dyn Fn() -> anyhow::Result<crate::ExternalDragPayload> + Send + Sync,
+        >,
+    ) -> anyhow::Result<()> {
+        self.platform.write_file_clipboard(provider)
+    }
+
+    /// Current platform clipboard revision, where available.
+    pub fn clipboard_revision(&self) -> Option<u64> {
+        self.platform.clipboard_revision()
+    }
+
+    /// Write an ordinary clipboard item.
     pub fn write_to_clipboard(&self, item: ClipboardItem) {
         self.platform.write_to_clipboard(item)
     }

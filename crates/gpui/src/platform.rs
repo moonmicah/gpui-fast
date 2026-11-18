@@ -625,6 +625,19 @@ pub trait Platform: 'static {
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
     fn write_to_clipboard(&self, item: ClipboardItem);
 
+    /// Publish a repeatable native file copy source. Providers run off the UI thread.
+    fn write_file_clipboard(
+        &self,
+        _provider: Arc<dyn Fn() -> anyhow::Result<ExternalDragPayload> + Send + Sync>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("native file clipboard is unavailable")
+    }
+
+    /// Changes whenever the system clipboard is replaced, including identical content.
+    fn clipboard_revision(&self) -> Option<u64> {
+        None
+    }
+
     /// Reads the clipboard, resolving once its contents are available.
     ///
     /// Most platforms read synchronously and return a ready task. Platforms

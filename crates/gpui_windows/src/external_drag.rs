@@ -75,6 +75,7 @@ pub(crate) struct DragExportSession {
     pub(crate) dropped: AtomicBool,
     pub(crate) failed: AtomicBool,
     pub(crate) active: AtomicUsize,
+    pub(crate) streams: AtomicUsize,
 }
 
 impl DragExportSession {
@@ -212,6 +213,7 @@ pub(crate) fn start(
                 dropped: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
                 active: AtomicUsize::new(0),
+                streams: AtomicUsize::new(0),
             });
             session.observe(NativeFileDragEvent::Started);
             unsafe {
@@ -700,6 +702,7 @@ pub(crate) struct ContentStream {
 
 impl ContentStream {
     pub(crate) fn new(descriptor: VirtualFileDescriptor, session: Arc<DragExportSession>) -> Self {
+        session.streams.fetch_add(1, Ordering::AcqRel);
         Self {
             descriptor,
             session,
@@ -710,6 +713,7 @@ impl ContentStream {
 }
 impl Drop for ContentStream {
     fn drop(&mut self) {
+        self.session.streams.fetch_sub(1, Ordering::AcqRel);
         if let Some(stream) = self.stream.get_mut() {
             stream.cancel();
         }
@@ -965,4 +969,290 @@ pub(crate) fn is_source_drag(data: &IDataObject, validation: usize) -> bool {
         ReleaseStgMedium(&mut medium);
         valid
     }
+}
+
+/// Clipboard data objects outlive a gesture and must create a fresh delivery for
+/// every paste. All COM state remains on the clipboard STA, including streams.
+#[implement(IDataObject, IDataObjectAsyncCapability)]
+struct ClipboardDataObject {
+    accepting: Arc<AtomicBool>,
+    provider: Arc<dyn Fn() -> anyhow::Result<ExternalDragPayload> + Send + Sync>,
+    lifetime: Arc<()>,
+    current: RefCell<Option<(IDataObject, Arc<DragExportSession>)>>,
+    sessions: Arc<std::sync::Mutex<Vec<Weak<DragExportSession>>>>,
+    in_operation: Cell<bool>,
+    async_mode: Cell<bool>,
+    descriptor_format: u16,
+    content_format: u16,
+    preferred_format: u16,
+}
+impl ClipboardDataObject {
+    fn current(&self) -> Result<(IDataObject, Arc<DragExportSession>)> {
+        if let Some(current) = self.current.borrow().as_ref() {
+            return Ok(current.clone());
+        }
+        let payload =
+            (self.provider)().map_err(|_| windows::core::Error::from_hresult(STG_E_REVERTED))?;
+        let session = Arc::new(DragExportSession {
+            payload,
+            resolved_payload: OnceLock::new(),
+            cancelled: AtomicBool::new(false),
+            content_allowed: AtomicBool::new(true),
+            window_lifetime: Arc::downgrade(&self.lifetime),
+            started: Instant::now(),
+            activity_ms: AtomicU64::new(0),
+            source_validation: 0,
+            finished: AtomicBool::new(false),
+            dropped: AtomicBool::new(true),
+            failed: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            streams: AtomicUsize::new(0),
+        });
+        self.sessions
+            .lock()
+            .map_err(|_| windows::core::Error::from_hresult(STG_E_REVERTED))?
+            .push(Arc::downgrade(&session));
+        let data: IDataObject = DragDataObject {
+            session: session.clone(),
+            async_mode: Cell::new(false),
+            in_operation: Cell::new(false),
+            descriptor_format: self.descriptor_format,
+            content_format: self.content_format,
+        }
+        .into();
+        self.current.replace(Some((data.clone(), session.clone())));
+        Ok((data, session))
+    }
+}
+impl IDataObject_Impl for ClipboardDataObject_Impl {
+    fn GetData(&self, requested: *const FORMATETC) -> Result<STGMEDIUM> {
+        if !self.accepting.load(Ordering::Acquire) && !self.in_operation.get() {
+            return Err(STG_E_REVERTED.into());
+        }
+        let requested = unsafe { requested.as_ref() }
+            .ok_or_else(|| windows::core::Error::from_hresult(E_POINTER))?;
+        self.QueryGetData(requested).ok()?;
+        if requested.cfFormat == self.preferred_format {
+            if requested.tymed & TYMED_HGLOBAL.0 as u32 == 0 {
+                return Err(DV_E_TYMED.into());
+            }
+            return global_medium(&DROPEFFECT_COPY.0.to_le_bytes());
+        }
+        if !self.in_operation.get()
+            && (requested.cfFormat == self.descriptor_format || requested.cfFormat == CF_HDROP.0)
+        {
+            self.current.replace(None);
+        }
+        let (data, session) = self.current()?;
+        if requested.cfFormat == self.content_format {
+            session.observe(NativeFileDragEvent::Started);
+        }
+        unsafe { data.GetData(requested) }
+    }
+    fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> Result<()> {
+        Err(DV_E_FORMATETC.into())
+    }
+    fn QueryGetData(&self, requested: *const FORMATETC) -> HRESULT {
+        let Some(requested) = (unsafe { requested.as_ref() }) else {
+            return E_POINTER;
+        };
+        if !requested.ptd.is_null() {
+            return DV_E_DVTARGETDEVICE;
+        }
+        if requested.dwAspect != DVASPECT_CONTENT.0 {
+            return DV_E_DVASPECT;
+        }
+        let session = match self.current() {
+            Ok((_, session)) => session,
+            Err(error) => return error.code(),
+        };
+        let local = matches!(session.payload, ExternalDragPayload::Files(_));
+        let medium = if requested.cfFormat == self.preferred_format
+            || (local && requested.cfFormat == CF_HDROP.0)
+            || (!local && requested.cfFormat == self.descriptor_format)
+        {
+            if requested.lindex != -1 {
+                return DV_E_LINDEX;
+            }
+            TYMED_HGLOBAL
+        } else if !local && requested.cfFormat == self.content_format {
+            if requested.lindex < 0 {
+                return DV_E_LINDEX;
+            }
+            TYMED_ISTREAM
+        } else {
+            return DV_E_FORMATETC;
+        };
+        if requested.tymed & medium.0 as u32 == 0 {
+            return DV_E_TYMED;
+        }
+        S_OK
+    }
+    fn GetCanonicalFormatEtc(&self, _: *const FORMATETC, output: *mut FORMATETC) -> HRESULT {
+        if output.is_null() {
+            return E_POINTER;
+        }
+        unsafe {
+            (*output).ptd = std::ptr::null_mut();
+        }
+        DATA_S_SAMEFORMATETC
+    }
+    fn SetData(&self, _: *const FORMATETC, _: *const STGMEDIUM, _: BOOL) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn EnumFormatEtc(&self, direction: u32) -> Result<IEnumFORMATETC> {
+        if direction != DATADIR_GET.0 as u32 {
+            return Err(E_NOTIMPL.into());
+        }
+        let (_, session) = self.current()?;
+        // Advertising formats must not enumerate a remote directory. Explorer
+        // probes these while copying, before the user has requested a paste.
+        let mut formats = if matches!(session.payload, ExternalDragPayload::Files(_)) {
+            vec![format(CF_HDROP.0, TYMED_HGLOBAL, -1)]
+        } else {
+            vec![
+                format(self.descriptor_format, TYMED_HGLOBAL, -1),
+                format(self.content_format, TYMED_ISTREAM, -1),
+            ]
+        };
+        formats.push(format(self.preferred_format, TYMED_HGLOBAL, -1));
+        unsafe { SHCreateStdEnumFmtEtc(&formats) }
+    }
+    fn DAdvise(&self, _: *const FORMATETC, _: u32, _: Ref<IAdviseSink>) -> Result<u32> {
+        Err(OLE_E_ADVISENOTSUPPORTED.into())
+    }
+    fn DUnadvise(&self, _: u32) -> Result<()> {
+        Err(OLE_E_ADVISENOTSUPPORTED.into())
+    }
+    fn EnumDAdvise(&self) -> Result<IEnumSTATDATA> {
+        Err(OLE_E_ADVISENOTSUPPORTED.into())
+    }
+}
+impl IDataObjectAsyncCapability_Impl for ClipboardDataObject_Impl {
+    fn SetAsyncMode(&self, value: BOOL) -> Result<()> {
+        self.async_mode.set(value.as_bool());
+        Ok(())
+    }
+    fn GetAsyncMode(&self) -> Result<BOOL> {
+        Ok(self.async_mode.get().into())
+    }
+    fn StartOperation(&self, _: Ref<IBindCtx>) -> Result<()> {
+        self.in_operation.set(true);
+        self.current()?.1.observe(NativeFileDragEvent::Started);
+        Ok(())
+    }
+    fn InOperation(&self) -> Result<BOOL> {
+        Ok(self.in_operation.get().into())
+    }
+    fn EndOperation(&self, result: HRESULT, _: Ref<IBindCtx>, _: u32) -> Result<()> {
+        self.in_operation.set(false);
+        if let Some((_, session)) = self.current.replace(None) {
+            if result.is_err() {
+                session.failed.store(true, Ordering::Release);
+                session.finish(NativeFileDragOutcome::Failed);
+                session.cancel();
+            } else {
+                session.finish(if session.failed.load(Ordering::Acquire) {
+                    NativeFileDragOutcome::Failed
+                } else {
+                    NativeFileDragOutcome::Provided
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn write_file_clipboard(
+    provider: Arc<dyn Fn() -> anyhow::Result<ExternalDragPayload> + Send + Sync>,
+) -> anyhow::Result<()> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("gpui-file-clipboard".into())
+        .spawn(move || unsafe {
+            if let Err(error) = OleInitialize(None) {
+                sender.send(Err(error.to_string())).log_err();
+                return;
+            }
+            let (data, (sessions, accepting)) = clipboard_data_object(provider);
+            let result = windows::Win32::System::Ole::OleSetClipboard(&data);
+            if sender
+                .send(result.as_ref().map(|_| ()).map_err(ToString::to_string))
+                .is_err()
+            {
+                if clipboard_is_current(&data) {
+                    windows::Win32::System::Ole::OleSetClipboard(None).log_err();
+                }
+            } else if result.is_ok() {
+                loop {
+                    let mut message = MSG::default();
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    let current = clipboard_is_current(&data);
+                    accepting.store(current, Ordering::Release);
+                    let mut active = false;
+                    if let Ok(mut sessions) = sessions.lock() {
+                        sessions.retain(|weak| {
+                            let Some(session) = weak.upgrade() else {
+                                return false;
+                            };
+                            if !current && session.idle_expired() {
+                                session.cancel();
+                            }
+                            active |= !session.cancelled.load(Ordering::Acquire)
+                                && session.streams.load(Ordering::Acquire) > 0;
+                            true
+                        });
+                    }
+                    if !current && !active {
+                        break;
+                    }
+                    MsgWaitForMultipleObjectsEx(None, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                }
+            }
+            drop(data);
+            OleUninitialize();
+        })?;
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(2))?
+        .map_err(anyhow::Error::msg)
+}
+
+fn clipboard_is_current(data: &IDataObject) -> bool {
+    use windows::core::Interface;
+    // The generated Result wrapper discards S_FALSE, which is significant here.
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn OleIsCurrentClipboard(data: *mut c_void) -> HRESULT;
+    }
+    unsafe { OleIsCurrentClipboard(data.as_raw()) == S_OK }
+}
+
+pub(crate) fn clipboard_data_object(
+    provider: Arc<dyn Fn() -> anyhow::Result<ExternalDragPayload> + Send + Sync>,
+) -> (
+    IDataObject,
+    (
+        Arc<std::sync::Mutex<Vec<Weak<DragExportSession>>>>,
+        Arc<AtomicBool>,
+    ),
+) {
+    let accepting = Arc::new(AtomicBool::new(true));
+    let sessions = Arc::new(std::sync::Mutex::new(Vec::<Weak<DragExportSession>>::new()));
+    let data: IDataObject = ClipboardDataObject {
+        accepting: accepting.clone(),
+        provider,
+        lifetime: Arc::new(()),
+        current: RefCell::new(None),
+        sessions: sessions.clone(),
+        in_operation: Cell::new(false),
+        async_mode: Cell::new(true),
+        descriptor_format: unsafe { RegisterClipboardFormatW(w!("FileGroupDescriptorW")) } as u16,
+        content_format: unsafe { RegisterClipboardFormatW(w!("FileContents")) } as u16,
+        preferred_format: unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) } as u16,
+    }
+    .into();
+    (data, (sessions, accepting))
 }

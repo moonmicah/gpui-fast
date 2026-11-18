@@ -1058,6 +1058,19 @@ impl Platform for WindowsPlatform {
         should_auto_hide_scrollbars().log_err().unwrap_or(false)
     }
 
+    fn write_file_clipboard(
+        &self,
+        provider: std::sync::Arc<
+            dyn Fn() -> anyhow::Result<gpui::ExternalDragPayload> + Send + Sync,
+        >,
+    ) -> anyhow::Result<()> {
+        crate::external_drag::write_file_clipboard(provider)
+    }
+
+    fn clipboard_revision(&self) -> Option<u64> {
+        Some(unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() } as u64)
+    }
+
     fn write_to_clipboard(&self, item: ClipboardItem) {
         write_to_clipboard(item);
     }
