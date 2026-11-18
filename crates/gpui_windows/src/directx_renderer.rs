@@ -441,7 +441,6 @@ impl DirectXRenderer {
         std::mem::swap(&mut self.resources, &mut target.resources);
         self.overlay_target = Some(target);
         result
->>>>>>> aa59342 (nyaterm: carry the local engine patches onto the release-form branch)
     }
 
     /// Clear the render target for `background_appearance` and encode every
